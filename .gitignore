@@ -4,3 +4,4 @@
 /lcs/progress/
 .vs/
 .vscode/
+/docker/ccache-*/
