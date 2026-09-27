@@ -1658,8 +1658,9 @@ bool software_raster_skipped(const std::array<std::uint32_t, 256> &commands) noe
         const char *value = std::getenv("PSPRECOMP_GE_GPU_SKIP_SOFTWARE_RASTER");
         if (value != nullptr && *value != '\0') return *value != '0';
         const LcsConfiguration &cfg = lcs_render_configuration();
-        return cfg.initialized && cfg.rendering.backend == RenderingBackend::DirectX12 &&
-               cfg.rendering.dx12_ge_color;
+        const bool gpu_backend = cfg.rendering.backend == RenderingBackend::DirectX12 ||
+                                 cfg.rendering.backend == RenderingBackend::Vulkan;
+        return cfg.initialized && gpu_backend && cfg.rendering.dx12_ge_color;
     }();
     static const bool skip_owned = [] {
         const char *value = std::getenv("PSPRECOMP_GE_GPU_SKIP_OWNED_RASTER");

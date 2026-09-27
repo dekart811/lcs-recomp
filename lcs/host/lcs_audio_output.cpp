@@ -1,15 +1,10 @@
 #include "lcs_audio_output.hpp"
-#include "lcs_audio_resampler.hpp"
+#include "lcs_audio_mixer.hpp"
 
 #include <algorithm>
-#include <array>
-#include <chrono>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
-#include <fstream>
-#include <limits>
-#include <sstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -24,308 +19,209 @@
 #include <windows.h>
 #include <mmsystem.h>
 
-#include <mutex>
+namespace lcs {
+namespace {
+
+struct WaveOutDevice {
+    struct Block {
+        WAVEHDR header{};
+        std::vector<std::int16_t> samples;
+    };
+
+    HWAVEOUT device{nullptr};
+    std::vector<Block> blocks;
+    std::size_t next_block{};
+    bool opened{};
+    bool failed{};
+
+    [[nodiscard]] const char *backend_name() const noexcept { return "waveOut"; }
+
+    bool ensure_open(AudioMixer &mixer) {
+        if (opened) return true;
+        if (failed) return false;
+        WAVEFORMATEX format{};
+        format.wFormatTag = WAVE_FORMAT_PCM;
+        format.nChannels = static_cast<WORD>(AudioMixer::kOutputChannels);
+        format.nSamplesPerSec = AudioMixer::kSampleRate;
+        format.wBitsPerSample = 16u;
+        format.nBlockAlign = static_cast<WORD>(AudioMixer::kOutputChannels * sizeof(std::int16_t));
+        format.nAvgBytesPerSec = AudioMixer::kSampleRate * format.nBlockAlign;
+        const MMRESULT open_result = waveOutOpen(&device, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL);
+        if (open_result != MMSYSERR_NOERROR) {
+            if (AudioMixer::diagnostics_enabled())
+                std::cerr << "[audio-host] waveOutOpen failed code=" << open_result << "\n";
+            failed = true;
+            device = nullptr;
+            return false;
+        }
+        waveOutPause(device);
+        blocks.resize(AudioMixer::kBlockCount);
+        next_block = 0u;
+        opened = true;
+        mixer.note_device_opened();
+        if (AudioMixer::diagnostics_enabled())
+            std::cerr << "[audio-host] waveOut 44100Hz stereo block_frames=" << AudioMixer::kBlockFrames
+                      << " blocks=" << AudioMixer::kBlockCount
+                      << " prebuffer_blocks=" << mixer.prebuffer_blocks()
+                      << " prebuffer_ms="
+                      << (mixer.prebuffer_blocks() * AudioMixer::kBlockFrames * 1000u /
+                          AudioMixer::kSampleRate) << "\n";
+        return true;
+    }
+
+    [[nodiscard]] std::size_t outstanding_blocks() const {
+        return static_cast<std::size_t>(std::count_if(
+            blocks.begin(), blocks.end(), [](const Block &block) {
+                return (block.header.dwFlags & WHDR_PREPARED) != 0u &&
+                    (block.header.dwFlags & WHDR_DONE) == 0u;
+            }));
+    }
+
+    bool begin_block(std::int16_t *&samples) {
+        Block &block = blocks[next_block];
+        if ((block.header.dwFlags & WHDR_PREPARED) != 0u) {
+            if ((block.header.dwFlags & WHDR_DONE) == 0u) return false;
+            waveOutUnprepareHeader(device, &block.header, sizeof(WAVEHDR));
+        }
+        block.samples.resize(AudioMixer::kBlockSamples);
+        samples = block.samples.data();
+        return true;
+    }
+
+    bool commit_block() {
+        Block &block = blocks[next_block];
+        block.header = WAVEHDR{};
+        block.header.lpData = reinterpret_cast<LPSTR>(block.samples.data());
+        block.header.dwBufferLength =
+            static_cast<DWORD>(block.samples.size() * sizeof(std::int16_t));
+        const MMRESULT prepare_result = waveOutPrepareHeader(device, &block.header, sizeof(WAVEHDR));
+        if (prepare_result != MMSYSERR_NOERROR) {
+            if (AudioMixer::diagnostics_enabled())
+                std::cerr << "[audio-host] waveOutPrepareHeader failed code=" << prepare_result << "\n";
+            return false;
+        }
+        const MMRESULT write_result = waveOutWrite(device, &block.header, sizeof(WAVEHDR));
+        if (write_result != MMSYSERR_NOERROR) {
+            if (AudioMixer::diagnostics_enabled())
+                std::cerr << "[audio-host] waveOutWrite failed code=" << write_result << "\n";
+            waveOutUnprepareHeader(device, &block.header, sizeof(WAVEHDR));
+            return false;
+        }
+        next_block = (next_block + 1u) % blocks.size();
+        return true;
+    }
+
+    void pause_playback() { waveOutPause(device); }
+    void resume_playback() { waveOutRestart(device); }
+
+    void close_device(bool playback_started) {
+        if (!opened || device == nullptr) return;
+        if (!playback_started) waveOutRestart(device);
+        waveOutReset(device);
+        for (Block &block : blocks) {
+            if ((block.header.dwFlags & WHDR_PREPARED) != 0u)
+                waveOutUnprepareHeader(device, &block.header, sizeof(WAVEHDR));
+        }
+        waveOutClose(device);
+        device = nullptr;
+        opened = false;
+        blocks.clear();
+    }
+};
+
+using AudioDevice = WaveOutDevice;
+
+#else
+
+#include <SDL.h>
 
 namespace lcs {
 namespace {
 
-constexpr std::uint32_t kSampleRate = StreamingLinearResampler::kOutputRate;
-constexpr std::uint32_t kOutputChannels = 2u;
-constexpr std::size_t kBlockFrames = 512u;
-constexpr std::size_t kBlockCount = 24u;
-constexpr std::size_t kDefaultPrebufferBlocks = 6u;
-constexpr std::uint64_t kMixSafetyFrames = 1024u;
-constexpr std::size_t kRingFrames = kSampleRate * 2u;
-constexpr std::size_t kGuestChannels = 9u;
-constexpr std::uint64_t kChannelDiscontinuityFrames = 64u;
-
-struct Block {
-    WAVEHDR header{};
-    std::vector<std::int16_t> samples;
-};
-
-struct ChannelStream {
-    StreamingLinearResampler resampler;
-    std::uint64_t cursor{};
-    std::uint64_t last_guest_time_us{};
-    std::uint32_t source_rate{kSampleRate};
-    bool stereo{true};
-    bool active{};
-};
-
-struct AudioState {
-    std::mutex mutex;
-    HWAVEOUT device{nullptr};
-    std::vector<Block> blocks;
-    std::size_t next_block{};
-    std::vector<std::int32_t> ring;
-    std::uint64_t output_frame{};
-    std::uint64_t guest_anchor_us{};
-    bool timeline_anchored{};
-    std::array<ChannelStream, kGuestChannels> channels{};
-    std::uint64_t late_frames_dropped{};
-    std::uint64_t overrun_frames_dropped{};
-    std::uint64_t queued_blocks{};
-    std::uint64_t underrun_rebuffers{};
-    std::uint64_t timeline_resyncs{};
-    std::uint64_t submit_calls{};
-    std::uint64_t submit_cpu_ns{};
-    std::uint64_t submit_cpu_max_ns{};
-    std::uint64_t last_summary_guest_us{};
-    std::ofstream wav_capture;
-    std::ofstream diagnostics_log;
-    std::uint64_t wav_frames{};
-    std::size_t prebuffer_blocks{kDefaultPrebufferBlocks};
-    std::size_t recovery_prebuffer_blocks{kDefaultPrebufferBlocks * 2u};
-    bool playback_started{};
-    bool recovering_from_underrun{};
+struct SdlAudioDevice {
+    SDL_AudioDeviceID device{};
+    std::vector<std::int16_t> block;
     bool opened{};
     bool failed{};
+
+    [[nodiscard]] const char *backend_name() const noexcept { return "SDL"; }
+
+    bool ensure_open(AudioMixer &mixer) {
+        if (opened) return true;
+        if (failed) return false;
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+            std::cerr << "[audio-host] SDL_InitSubSystem failed: " << SDL_GetError() << "\n";
+            failed = true;
+            return false;
+        }
+        SDL_AudioSpec want{};
+        want.freq = static_cast<int>(AudioMixer::kSampleRate);
+        want.format = AUDIO_S16SYS;
+        want.channels = static_cast<Uint8>(AudioMixer::kOutputChannels);
+        want.samples = static_cast<Uint16>(AudioMixer::kBlockFrames);
+        SDL_AudioSpec got{};
+        device = SDL_OpenAudioDevice(nullptr, 0, &want, &got, 0);
+        if (device == 0) {
+            std::cerr << "[audio-host] SDL_OpenAudioDevice failed: " << SDL_GetError() << "\n";
+            failed = true;
+            return false;
+        }
+        SDL_PauseAudioDevice(device, 1);
+        block.resize(AudioMixer::kBlockSamples);
+        opened = true;
+        mixer.note_device_opened();
+        std::cerr << "[audio-host] SDL " << got.freq << "Hz channels="
+                  << static_cast<int>(got.channels) << " prebuffer_ms="
+                  << (mixer.prebuffer_blocks() * AudioMixer::kBlockFrames * 1000u /
+                      AudioMixer::kSampleRate) << "\n";
+        return true;
+    }
+
+    [[nodiscard]] std::size_t outstanding_blocks() const {
+        if (device == 0) return 0u;
+        return SDL_GetQueuedAudioSize(device) /
+            (AudioMixer::kBlockSamples * sizeof(std::int16_t));
+    }
+
+    bool begin_block(std::int16_t *&samples) {
+        if (outstanding_blocks() >= AudioMixer::kBlockCount) return false;
+        if (block.size() != AudioMixer::kBlockSamples) block.resize(AudioMixer::kBlockSamples);
+        samples = block.data();
+        return true;
+    }
+
+    bool commit_block() {
+        return SDL_QueueAudio(device, block.data(),
+                              static_cast<Uint32>(AudioMixer::kBlockSamples * sizeof(std::int16_t))) == 0;
+    }
+
+    void pause_playback() { SDL_PauseAudioDevice(device, 1); }
+    void resume_playback() { SDL_PauseAudioDevice(device, 0); }
+
+    void close_device(bool) {
+        if (!opened || device == 0) return;
+        SDL_PauseAudioDevice(device, 1);
+        SDL_ClearQueuedAudio(device);
+        SDL_CloseAudioDevice(device);
+        device = 0;
+        opened = false;
+        block.clear();
+    }
 };
 
-AudioState &audio_state() {
-    static AudioState state;
-    return state;
-}
+using AudioDevice = SdlAudioDevice;
 
-bool diagnostics_enabled() {
-    static const bool enabled = std::getenv("PSPRECOMP_AUDIO_DIAG") != nullptr;
-    return enabled;
-}
+#endif
 
-bool summary_diagnostics_enabled() {
-    static const bool enabled = [] {
-        const char *text = std::getenv("PSPRECOMP_AUDIO_SUMMARY");
-        if (text != nullptr)
-            return *text != '\0' && std::strcmp(text, "0") != 0;
-        return false;
-    }();
-    return enabled;
-}
+struct AudioHost {
+    std::mutex mutex;
+    AudioMixer mixer;
+    AudioDevice device;
+};
 
-std::size_t configured_prebuffer_blocks() {
-    const char *text = std::getenv("PSPRECOMP_AUDIO_PREBUFFER_BLOCKS");
-    if (text == nullptr || *text == '\0') return kDefaultPrebufferBlocks;
-    char *end = nullptr;
-    const unsigned long value = std::strtoul(text, &end, 0);
-    if (end == text || *end != '\0') return kDefaultPrebufferBlocks;
-    return std::clamp<std::size_t>(static_cast<std::size_t>(value), 2u, kBlockCount - 2u);
-}
-
-std::size_t outstanding_blocks(const AudioState &state) {
-    return static_cast<std::size_t>(std::count_if(
-        state.blocks.begin(), state.blocks.end(), [](const Block &block) {
-            return (block.header.dwFlags & WHDR_PREPARED) != 0u &&
-                (block.header.dwFlags & WHDR_DONE) == 0u;
-        }));
-}
-
-void wav_write_u16(std::ostream &out, std::uint16_t value) {
-    const std::array<char, 2> bytes{
-        static_cast<char>(value & 0xFFu), static_cast<char>((value >> 8u) & 0xFFu)};
-    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-}
-
-void wav_write_u32(std::ostream &out, std::uint32_t value) {
-    const std::array<char, 4> bytes{
-        static_cast<char>(value & 0xFFu), static_cast<char>((value >> 8u) & 0xFFu),
-        static_cast<char>((value >> 16u) & 0xFFu), static_cast<char>((value >> 24u) & 0xFFu)};
-    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-}
-
-void wav_write_header(std::ostream &out, std::uint64_t frames) {
-    const std::uint64_t payload64 = frames * kOutputChannels * sizeof(std::int16_t);
-    const std::uint32_t payload = static_cast<std::uint32_t>(
-        std::min<std::uint64_t>(payload64, 0xFFFFFFFFull - 44u));
-    out.write("RIFF", 4); wav_write_u32(out, 36u + payload);
-    out.write("WAVEfmt ", 8); wav_write_u32(out, 16u);
-    wav_write_u16(out, 1u); wav_write_u16(out, static_cast<std::uint16_t>(kOutputChannels));
-    wav_write_u32(out, kSampleRate);
-    wav_write_u32(out, kSampleRate * kOutputChannels * sizeof(std::int16_t));
-    wav_write_u16(out, static_cast<std::uint16_t>(kOutputChannels * sizeof(std::int16_t)));
-    wav_write_u16(out, 16u);
-    out.write("data", 4); wav_write_u32(out, payload);
-}
-
-void open_wav_capture(AudioState &state) {
-    const char *path = std::getenv("PSPRECOMP_AUDIO_WAV");
-    if (path == nullptr || *path == '\0') return;
-    state.wav_capture.open(path, std::ios::binary | std::ios::trunc);
-    if (!state.wav_capture) {
-        if (diagnostics_enabled())
-            std::cerr << "[audio-host] unable to create WAV capture: " << path << "\n";
-        return;
-    }
-    wav_write_header(state.wav_capture, 0u);
-    state.wav_frames = 0u;
-    if (diagnostics_enabled())
-        std::cerr << "[audio-host] WAV capture: " << path << "\n";
-}
-
-void close_wav_capture(AudioState &state) {
-    if (!state.wav_capture.is_open()) return;
-    state.wav_capture.flush();
-    state.wav_capture.seekp(0, std::ios::beg);
-    wav_write_header(state.wav_capture, state.wav_frames);
-    state.wav_capture.close();
-}
-
-bool ensure_device(AudioState &state) {
-    if (state.opened) return true;
-    if (state.failed) return false;
-
-    WAVEFORMATEX format{};
-    format.wFormatTag = WAVE_FORMAT_PCM;
-    format.nChannels = static_cast<WORD>(kOutputChannels);
-    format.nSamplesPerSec = kSampleRate;
-    format.wBitsPerSample = 16u;
-    format.nBlockAlign = static_cast<WORD>(kOutputChannels * sizeof(std::int16_t));
-    format.nAvgBytesPerSec = kSampleRate * format.nBlockAlign;
-
-    const MMRESULT open_result =
-        waveOutOpen(&state.device, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL);
-    if (open_result != MMSYSERR_NOERROR) {
-        if (diagnostics_enabled())
-            std::cerr << "[audio-host] waveOutOpen failed code=" << open_result << "\n";
-        state.failed = true;
-        state.device = nullptr;
-        return false;
-    }
-
-    (void)waveOutPause(state.device);
-    state.blocks.resize(kBlockCount);
-    state.ring.assign(kRingFrames * kOutputChannels, 0);
-    state.next_block = 0u;
-    state.output_frame = 0u;
-    state.queued_blocks = 0u;
-    state.prebuffer_blocks = configured_prebuffer_blocks();
-    state.recovery_prebuffer_blocks = std::clamp<std::size_t>(
-        state.prebuffer_blocks + 2u, state.prebuffer_blocks, kBlockCount - 2u);
-    state.playback_started = false;
-    state.recovering_from_underrun = false;
-    if (summary_diagnostics_enabled()) {
-        state.diagnostics_log.open("LCSAudio.log", std::ios::out | std::ios::trunc);
-        if (state.diagnostics_log)
-            state.diagnostics_log << "[audio-log] block_frames=" << kBlockFrames
-                                  << " startup_blocks=" << state.prebuffer_blocks
-                                  << " recovery_blocks=" << state.recovery_prebuffer_blocks
-                                  << "\n";
-    }
-    open_wav_capture(state);
-    if (diagnostics_enabled())
-        std::cerr << "[audio-host] waveOut 44100Hz stereo block_frames=" << kBlockFrames
-                  << " blocks=" << kBlockCount
-                  << " prebuffer_blocks=" << state.prebuffer_blocks
-                  << " prebuffer_ms="
-                  << (state.prebuffer_blocks * kBlockFrames * 1000u / kSampleRate) << "\n";
-    state.opened = true;
-    return true;
-}
-
-std::uint64_t guest_frame_for(const AudioState &state, std::uint64_t guest_time_us) {
-    if (!state.timeline_anchored || guest_time_us <= state.guest_anchor_us) return 0u;
-    const std::uint64_t delta = guest_time_us - state.guest_anchor_us;
-    return (delta * kSampleRate + 500000u) / 1000000u;
-}
-
-bool queue_one_block(AudioState &state) {
-    Block &block = state.blocks[state.next_block];
-    if ((block.header.dwFlags & WHDR_PREPARED) != 0u) {
-        if ((block.header.dwFlags & WHDR_DONE) == 0u) return false;
-        (void)waveOutUnprepareHeader(state.device, &block.header, sizeof(WAVEHDR));
-    }
-
-    block.samples.resize(kBlockFrames * kOutputChannels);
-    for (std::size_t frame = 0u; frame < kBlockFrames; ++frame) {
-        const std::size_t slot =
-            static_cast<std::size_t>((state.output_frame + frame) % kRingFrames) * kOutputChannels;
-        for (std::size_t channel = 0u; channel < kOutputChannels; ++channel) {
-            block.samples[frame * kOutputChannels + channel] = static_cast<std::int16_t>(
-                std::clamp(state.ring[slot + channel], -32768, 32767));
-            state.ring[slot + channel] = 0;
-        }
-    }
-
-    if (state.wav_capture.is_open()) {
-        state.wav_capture.write(reinterpret_cast<const char *>(block.samples.data()),
-                                static_cast<std::streamsize>(block.samples.size() * sizeof(std::int16_t)));
-        if (state.wav_capture) state.wav_frames += kBlockFrames;
-    }
-
-    block.header = WAVEHDR{};
-    block.header.lpData = reinterpret_cast<LPSTR>(block.samples.data());
-    block.header.dwBufferLength = static_cast<DWORD>(block.samples.size() * sizeof(std::int16_t));
-    const MMRESULT prepare_result =
-        waveOutPrepareHeader(state.device, &block.header, sizeof(WAVEHDR));
-    if (prepare_result != MMSYSERR_NOERROR) {
-        if (diagnostics_enabled())
-            std::cerr << "[audio-host] waveOutPrepareHeader failed code="
-                      << prepare_result << "\n";
-        return false;
-    }
-    const MMRESULT write_result = waveOutWrite(state.device, &block.header, sizeof(WAVEHDR));
-    if (write_result != MMSYSERR_NOERROR) {
-        if (diagnostics_enabled())
-            std::cerr << "[audio-host] waveOutWrite failed code=" << write_result << "\n";
-        (void)waveOutUnprepareHeader(state.device, &block.header, sizeof(WAVEHDR));
-        return false;
-    }
-
-    state.output_frame += kBlockFrames;
-    state.next_block = (state.next_block + 1u) % state.blocks.size();
-    ++state.queued_blocks;
-
-    const std::size_t target_blocks = state.recovering_from_underrun
-        ? state.recovery_prebuffer_blocks : state.prebuffer_blocks;
-    if (!state.playback_started && outstanding_blocks(state) >= target_blocks) {
-        if (waveOutRestart(state.device) == MMSYSERR_NOERROR) {
-            state.playback_started = true;
-            state.recovering_from_underrun = false;
-            if (diagnostics_enabled())
-                std::cerr << "[audio-host] waveOut started with " << state.queued_blocks
-                          << " prebuffered blocks\n";
-        }
-    }
-    return true;
-}
-
-void advance_locked(AudioState &state, std::uint64_t guest_time_us) {
-    if (!state.timeline_anchored || !state.opened) return;
-    std::size_t outstanding = outstanding_blocks(state);
-    if (state.playback_started) {
-        if (outstanding == 0u) {
-            (void)waveOutPause(state.device);
-            ++state.underrun_rebuffers;
-            state.playback_started = false;
-            state.recovering_from_underrun = true;
-        }
-    }
-    const std::uint64_t guest_frame = guest_frame_for(state, guest_time_us);
-    const std::uint64_t safety_frames = state.playback_started && outstanding <= 2u
-        ? 0u : kMixSafetyFrames;
-    const std::uint64_t sealed_frame = guest_frame > safety_frames
-        ? guest_frame - safety_frames : 0u;
-    const std::size_t latency_limit_blocks = state.prebuffer_blocks + 2u;
-    while (sealed_frame >= state.output_frame + kBlockFrames) {
-        if (state.playback_started && outstanding >= latency_limit_blocks) {
-            for (std::size_t frame = 0u; frame < kBlockFrames; ++frame) {
-                const std::size_t slot =
-                    static_cast<std::size_t>((state.output_frame + frame) % kRingFrames) * kOutputChannels;
-                for (std::size_t channel = 0u; channel < kOutputChannels; ++channel)
-                    state.ring[slot + channel] = 0;
-            }
-            state.output_frame += kBlockFrames;
-            state.late_frames_dropped += kBlockFrames;
-            continue;
-        }
-        if (!queue_one_block(state)) break;
-        ++outstanding;
-    }
-}
-
-void reset_channel_locked(AudioState &state, std::uint32_t channel) {
-    if (channel >= state.channels.size()) return;
-    state.channels[channel] = ChannelStream{};
+AudioHost &audio_host() {
+    static AudioHost host;
+    return host;
 }
 
 }
@@ -343,186 +239,31 @@ void audio_output_submit(std::span<const std::int16_t> pcm, std::uint32_t frames
                          bool stereo, std::uint32_t left, std::uint32_t right,
                          std::uint32_t source_rate, std::uint32_t channel,
                          std::uint64_t start_time_us, std::uint64_t now_us) {
-    if (!audio_output_enabled() || frames == 0u || channel >= kGuestChannels) return;
-    if (source_rate == 0u) source_rate = kSampleRate;
-    const std::size_t needed = static_cast<std::size_t>(frames) * (stereo ? 2u : 1u);
-    if (pcm.size() < needed) return;
-    const bool measure_submit = summary_diagnostics_enabled();
-    const auto submit_started = measure_submit
-        ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-
-    AudioState &state = audio_state();
-    std::lock_guard<std::mutex> guard(state.mutex);
-    if (!ensure_device(state)) return;
-
-    if (!state.timeline_anchored) {
-        state.guest_anchor_us = std::min(start_time_us, now_us);
-        state.timeline_anchored = true;
-        state.output_frame = 0u;
-    }
-
-    advance_locked(state, now_us);
-
-    ChannelStream &stream = state.channels[channel];
-    const std::uint64_t scheduled = guest_frame_for(state, start_time_us);
-    const auto distance = [](std::uint64_t a, std::uint64_t b) {
-        return a > b ? a - b : b - a;
-    };
-    const bool format_changed = stream.active &&
-        (stream.source_rate != source_rate || stream.stereo != stereo);
-    const bool discontinuity = stream.active &&
-        distance(stream.cursor, scheduled) > kChannelDiscontinuityFrames;
-    const std::uint64_t previous_cursor = stream.cursor;
-    if (!stream.active || format_changed || discontinuity) {
-        stream = ChannelStream{};
-        stream.active = true;
-        stream.source_rate = source_rate;
-        stream.stereo = stereo;
-        stream.resampler.reset(source_rate, stereo);
-        stream.cursor = std::max(scheduled, state.output_frame);
-        if (discontinuity) ++state.timeline_resyncs;
-        if (diagnostics_enabled() && discontinuity)
-            std::cerr << "[audio-host] channel " << channel << " timeline resync old="
-                      << previous_cursor << " scheduled=" << scheduled << "\n";
-    }
-
-    if (stream.cursor < state.output_frame) {
-        state.late_frames_dropped += state.output_frame - stream.cursor;
-        stream.cursor = state.output_frame;
-        stream.resampler.reset(source_rate, stereo);
-    }
-
-    const std::uint32_t master = 100u;
-    const std::int64_t left_gain = (static_cast<std::int64_t>(left) * master) / 100;
-    const std::int64_t right_gain = (static_cast<std::int64_t>(right) * master) / 100;
-    const std::uint64_t ring_limit = state.output_frame + kRingFrames - kBlockFrames;
-
-    stream.resampler.process(pcm, frames, stereo, source_rate,
-        [&](std::int16_t source_left, std::int16_t source_right) {
-            if (stream.cursor >= ring_limit) {
-                ++state.overrun_frames_dropped;
-                ++stream.cursor;
-                return;
-            }
-            const std::size_t slot =
-                static_cast<std::size_t>(stream.cursor % kRingFrames) * kOutputChannels;
-            const std::int64_t mixed_left =
-                (static_cast<std::int64_t>(source_left) * left_gain) >> 15;
-            const std::int64_t mixed_right =
-                (static_cast<std::int64_t>(source_right) * right_gain) >> 15;
-            state.ring[slot] += static_cast<std::int32_t>(std::clamp<std::int64_t>(
-                mixed_left, std::numeric_limits<std::int32_t>::min(),
-                std::numeric_limits<std::int32_t>::max()));
-            state.ring[slot + 1u] += static_cast<std::int32_t>(std::clamp<std::int64_t>(
-                mixed_right, std::numeric_limits<std::int32_t>::min(),
-                std::numeric_limits<std::int32_t>::max()));
-            ++stream.cursor;
-        });
-
-    stream.last_guest_time_us = start_time_us;
-    advance_locked(state, now_us);
-    if (measure_submit) {
-        const std::uint64_t submit_ns = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - submit_started).count());
-        ++state.submit_calls;
-        state.submit_cpu_ns += submit_ns;
-        state.submit_cpu_max_ns = std::max(state.submit_cpu_max_ns, submit_ns);
-    }
+    if (!audio_output_enabled()) return;
+    AudioHost &host = audio_host();
+    std::lock_guard<std::mutex> guard(host.mutex);
+    host.mixer.submit(pcm, frames, stereo, left, right, source_rate, channel,
+                      start_time_us, now_us, host.device);
 }
 
 void audio_output_advance(std::uint64_t guest_time_us) {
     if (!audio_output_enabled()) return;
-    AudioState &state = audio_state();
-    std::lock_guard<std::mutex> guard(state.mutex);
-    if (!state.opened) return;
-    advance_locked(state, guest_time_us);
-    if (summary_diagnostics_enabled() &&
-        (state.last_summary_guest_us == 0u ||
-         guest_time_us - state.last_summary_guest_us >= 2'000'000u)) {
-        const std::uint64_t guest_frame = guest_frame_for(state, guest_time_us);
-        const std::size_t outstanding = outstanding_blocks(state);
-        const std::uint64_t average_submit_us = state.submit_calls == 0u ? 0u
-            : state.submit_cpu_ns / state.submit_calls / 1000u;
-        std::ostringstream line;
-        line << "[audio-summary] guest_us=" << guest_time_us
-             << " guest_frame=" << guest_frame
-             << " output_frame=" << state.output_frame
-             << " outstanding_blocks=" << outstanding
-             << " playback=" << state.playback_started
-             << " recovering=" << state.recovering_from_underrun
-             << " underrun_rebuffers=" << state.underrun_rebuffers
-             << " resyncs=" << state.timeline_resyncs
-             << " late_frames=" << state.late_frames_dropped
-             << " overrun_frames=" << state.overrun_frames_dropped
-             << " submit_calls=" << state.submit_calls
-             << " submit_avg_us=" << average_submit_us
-             << " submit_max_us=" << state.submit_cpu_max_ns / 1000u << "\n";
-        std::cerr << line.str();
-        if (state.diagnostics_log) {
-            state.diagnostics_log << line.str();
-            state.diagnostics_log.flush();
-        }
-        state.last_summary_guest_us = guest_time_us;
-    }
+    AudioHost &host = audio_host();
+    std::lock_guard<std::mutex> guard(host.mutex);
+    host.mixer.advance(guest_time_us, host.device);
+    host.mixer.write_summary(guest_time_us, host.device);
 }
 
 void audio_output_reset_channel(std::uint32_t channel) {
-    AudioState &state = audio_state();
-    std::lock_guard<std::mutex> guard(state.mutex);
-    reset_channel_locked(state, channel);
+    AudioHost &host = audio_host();
+    std::lock_guard<std::mutex> guard(host.mutex);
+    host.mixer.reset_channel(channel);
 }
 
 void audio_output_shutdown() {
-    AudioState &state = audio_state();
-    std::lock_guard<std::mutex> guard(state.mutex);
-    if (!state.opened || state.device == nullptr) return;
-
-    if (!state.playback_started) (void)waveOutRestart(state.device);
-    (void)waveOutReset(state.device);
-    for (Block &block : state.blocks) {
-        if ((block.header.dwFlags & WHDR_PREPARED) != 0u)
-            (void)waveOutUnprepareHeader(state.device, &block.header, sizeof(WAVEHDR));
-    }
-    (void)waveOutClose(state.device);
-    close_wav_capture(state);
-    if (state.diagnostics_log.is_open()) state.diagnostics_log.close();
-
-    state.device = nullptr;
-    state.opened = false;
-    state.blocks.clear();
-    state.ring.clear();
-    state.timeline_anchored = false;
-    state.playback_started = false;
-    state.recovering_from_underrun = false;
-    state.queued_blocks = 0u;
-    state.output_frame = 0u;
-    state.last_summary_guest_us = 0u;
-    for (std::uint32_t channel = 0u; channel < kGuestChannels; ++channel)
-        reset_channel_locked(state, channel);
-
-    if (diagnostics_enabled() && (state.late_frames_dropped != 0u || state.overrun_frames_dropped != 0u)) {
-        std::cerr << "[audio-host] shutdown late_frames=" << state.late_frames_dropped
-                  << " overrun_frames=" << state.overrun_frames_dropped << "\n";
-    }
-    state.late_frames_dropped = 0u;
-    state.overrun_frames_dropped = 0u;
+    AudioHost &host = audio_host();
+    std::lock_guard<std::mutex> guard(host.mutex);
+    host.mixer.shutdown(host.device);
 }
 
 }
-
-#else
-
-namespace lcs {
-
-bool audio_output_enabled() { return false; }
-void audio_output_submit(std::span<const std::int16_t>, std::uint32_t, bool,
-                         std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
-                         std::uint64_t, std::uint64_t) {}
-void audio_output_advance(std::uint64_t) {}
-void audio_output_reset_channel(std::uint32_t) {}
-void audio_output_shutdown() {}
-
-}
-
-#endif

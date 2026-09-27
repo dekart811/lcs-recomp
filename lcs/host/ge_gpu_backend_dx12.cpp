@@ -1274,7 +1274,7 @@ bool ensure_framebuffer_target(Dx12GeState &s, std::uint32_t address,
     s.frame_targets.emplace(address, std::move(target));
     s.known_frame_targets.insert(address);
     s.report.framebuffer_targets_observed = s.known_frame_targets.size();
-    s.report.dx12_native_framebuffer_targets = s.frame_targets.size();
+    s.report.native_framebuffer_targets = s.frame_targets.size();
     {
         std::ostringstream log;
         const auto created = s.frame_targets.find(address);
@@ -2214,6 +2214,12 @@ bool initialize_ge_gpu_backend(std::string &error) {
         ? GeGpuBackendKind::DirectX12 : GeGpuBackendKind::Software;
     s.report.active = GeGpuBackendKind::Software;
     s.report.frames_in_flight_capacity = kFrameCount;
+    if (rendering.backend == RenderingBackend::Vulkan) {
+        s.report.requested = GeGpuBackendKind::Vulkan;
+        s.report.message = "Vulkan GE backend is not built into this Windows binary";
+        error.clear();
+        return true;
+    }
     if (rendering.backend != RenderingBackend::DirectX12) {
         s.report.message = "Software GE backend active";
         error.clear();
@@ -2997,8 +3003,8 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
                         s.list->OMSetRenderTargets(1u, &self_rtv, FALSE, &self_dsv);
                         srv_index = feedback->feedback_srv_index;
                         ++s.report.vram_feedback_refreshes;
-                        ++s.report.dx12_gpu_feedback_draws;
-                        ++s.report.dx12_self_feedback_snapshots;
+                        ++s.report.gpu_feedback_draws;
+                        ++s.report.self_feedback_snapshots;
                     } else if (!feedback_error.empty()) {
                         runtime_log_error("dx12 self-feedback", feedback_error);
                     }
@@ -3006,7 +3012,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
                     resolve_target_for_sampling(s, *feedback, false);
                     srv_index = feedback->srv_index;
                     ++s.report.vram_feedback_refreshes;
-                    ++s.report.dx12_gpu_feedback_draws;
+                    ++s.report.gpu_feedback_draws;
                 }
                 if (feedback_address == s.display_framebuffer)
                     ++s.report.display_framebuffer_sampled_draws;
@@ -3282,7 +3288,7 @@ bool ge_gpu_backend_copy_offscreen_rgba(std::span<std::byte> destination) noexce
 void ge_gpu_backend_mark_window_presented() noexcept { state().report.gpu_frame_presented_to_window = true; }
 GeGpuBackendReport ge_gpu_backend_report() { return state().report; }
 
-#else
+#elif !defined(LCS_VULKAN_GE_BACKEND)
 
 namespace {
 struct Dx12StubState { GeGpuBackendReport report{}; std::uint32_t display_framebuffer{}; };
@@ -3341,6 +3347,7 @@ const char *ge_gpu_backend_name(GeGpuBackendKind kind) noexcept {
     switch (kind) {
     case GeGpuBackendKind::Software: return "software";
     case GeGpuBackendKind::DirectX12: return "directx12";
+    case GeGpuBackendKind::Vulkan: return "vulkan";
     }
     return "unknown";
 }
