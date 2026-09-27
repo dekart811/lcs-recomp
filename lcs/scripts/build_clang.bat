@@ -15,7 +15,7 @@ call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 4
 if not exist "%BUILD%\build.ninja" (
   cmake -S "%REPO%" -B "%BUILD%" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
     -DCMAKE_C_COMPILER="%LLVM%\clang-cl.exe" -DCMAKE_CXX_COMPILER="%LLVM%\clang-cl.exe" ^
-    -DCMAKE_LINKER="%LLVM%\lld-link.exe" || exit /b 5
+    -DCMAKE_LINKER="%LLVM%\lld-link.exe" -DCMAKE_RC_COMPILER="%LLVM%\llvm-rc.exe" || exit /b 5
 )
 ninja -C "%BUILD%" LCSNative
 set "CODE=%errorlevel%"

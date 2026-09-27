@@ -46,6 +46,7 @@ struct DisplayConfiguration {
     DisplayUpscaleFilter upscale_filter{DisplayUpscaleFilter::Nearest};
     bool integer_scale{false};
     bool show_fps{false};
+    bool vsync{false};
     float hud_scale{1.0f};
 };
 

@@ -3200,7 +3200,9 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
 
     bool presented = false;
     if (recorded_present && s.swapchain) {
-        hr = s.swapchain->Present(0u, s.swapchain_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0u);
+        const bool vsync = lcs_render_configuration().display.vsync;
+        hr = s.swapchain->Present(vsync ? 1u : 0u,
+                                  !vsync && s.swapchain_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0u);
         if (SUCCEEDED(hr)) {
             presented = true;
             s.direct_present_ok = true;

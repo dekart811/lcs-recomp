@@ -8,6 +8,7 @@
 #include "lcs_media_decoder.hpp"
 #include "lcs_audio_output.hpp"
 #include "lcs_fps_overlay.hpp"
+#include "lcs_frame_limit.hpp"
 
 #include "psprecomp/common.hpp"
 
@@ -1765,7 +1766,7 @@ std::uint32_t throttle_vblank_to_real_time() {
         return 0u;
     }
     if (now < next_vblank) {
-        std::this_thread::sleep_until(next_vblank);
+        precise_sleep_until(next_vblank);
         next_vblank += period;
         return 0u;
     }
@@ -1902,7 +1903,7 @@ void cap_frame_rate(std::uint32_t list_address) {
         deadline = now + period;
         return;
     }
-    if (now < deadline) std::this_thread::sleep_until(deadline);
+    if (now < deadline) precise_sleep_until(deadline);
     deadline += period;
 }
 
