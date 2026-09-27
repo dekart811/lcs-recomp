@@ -3,7 +3,10 @@ set(FFMPEG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg)
 
 file(GLOB HOST_SOURCES CONFIGURE_DEPENDS host/*.cpp)
 add_executable(LCSNative ${HOST_SOURCES})
-target_include_directories(LCSNative PRIVATE host ${FFMPEG_DIR}/include)
+target_include_directories(LCSNative PRIVATE host)
+if(WIN32)
+    target_include_directories(LCSNative PRIVATE ${FFMPEG_DIR}/include)
+endif()
 target_link_libraries(LCSNative PRIVATE psprecomp_core)
 
 if(MSVC)
@@ -28,10 +31,58 @@ if(WIN32)
                 -Executable $<TARGET_FILE:LCSNative>)
     endif()
 else()
-    foreach(lib ${FFMPEG_LIBS})
-        find_library(FFMPEG_${lib} ${lib} REQUIRED)
-        target_link_libraries(LCSNative PRIVATE ${FFMPEG_${lib}})
-    endforeach()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+        libavcodec libavformat libavutil libswresample libswscale)
+    pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+    pkg_check_modules(VULKAN REQUIRED IMPORTED_TARGET vulkan)
+    find_package(Threads REQUIRED)
+    target_compile_definitions(LCSNative PRIVATE LCS_VULKAN_GE_BACKEND=1)
+    target_link_libraries(LCSNative PRIVATE
+        PkgConfig::FFMPEG PkgConfig::SDL2 PkgConfig::VULKAN Threads::Threads)
+    # ge_spv.hpp is produced here so an edit to ge.vert or ge.frag is what the binary runs.
+    find_program(LCS_GLSLANG NAMES glslangValidator glslang REQUIRED)
+    set(LCS_GE_SPV_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/vulkan/ge_spv.hpp)
+    add_custom_command(
+        OUTPUT ${LCS_GE_SPV_HEADER}
+        COMMAND ${CMAKE_COMMAND}
+            -DGLSLANG=${LCS_GLSLANG}
+            -DVERT=${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/ge.vert
+            -DFRAG=${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/ge.frag
+            -DOUT=${LCS_GE_SPV_HEADER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/embed_spirv.cmake
+        DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/ge.vert
+            ${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/ge.frag
+            ${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/embed_spirv.cmake
+        COMMENT "Compiling Vulkan GE shaders"
+        VERBATIM)
+    add_custom_target(lcs_ge_spirv DEPENDS ${LCS_GE_SPV_HEADER})
+    add_dependencies(LCSNative lcs_ge_spirv)
+    target_include_directories(LCSNative BEFORE PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/host/ge_gpu_backend_vulkan.cpp
+        PROPERTIES OBJECT_DEPENDS ${LCS_GE_SPV_HEADER})
+    # Some linkers do not resolve the shared libraries FFmpeg itself depends on.
+    # Probe a small link, and only then pass FFmpeg's own libdir as -rpath-link.
+    include(CheckCXXSourceCompiles)
+    set(_lcs_ffmpeg_probe [=[
+extern "C" int avformat_version();
+int main() { return avformat_version() == 0; }
+]=])
+    set(CMAKE_REQUIRED_LIBRARIES ${FFMPEG_LINK_LIBRARIES})
+    check_cxx_source_compiles("${_lcs_ffmpeg_probe}" LCS_FFMPEG_LINKS)
+    if(NOT LCS_FFMPEG_LINKS)
+        pkg_get_variable(LCS_FFMPEG_LIBDIR libavcodec libdir)
+        if(LCS_FFMPEG_LIBDIR)
+            set(CMAKE_REQUIRED_LINK_OPTIONS "-Wl,-rpath-link,${LCS_FFMPEG_LIBDIR}")
+            check_cxx_source_compiles("${_lcs_ffmpeg_probe}" LCS_FFMPEG_LINKS_WITH_LIBDIR)
+            unset(CMAKE_REQUIRED_LINK_OPTIONS)
+            if(LCS_FFMPEG_LINKS_WITH_LIBDIR)
+                target_link_options(LCSNative PRIVATE "-Wl,-rpath-link,${LCS_FFMPEG_LIBDIR}")
+            endif()
+        endif()
+    endif()
+    unset(CMAKE_REQUIRED_LIBRARIES)
 endif()
 
 file(GLOB GENERATED_SOURCES CONFIGURE_DEPENDS generated/*.cpp)

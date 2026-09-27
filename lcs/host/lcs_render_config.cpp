@@ -203,8 +203,10 @@ void apply_rendering_key(LcsConfiguration &config, const std::string &key,
         const std::string backend = lowercase_copy(trim_copy(value));
         if (backend == "directx12" || backend == "dx12" || backend == "d3d12" || backend == "gpu")
             config.rendering.backend = RenderingBackend::DirectX12;
+        else if (backend == "vulkan" || backend == "vk")
+            config.rendering.backend = RenderingBackend::Vulkan;
         else
-            warning(config, line, "Rendering.Backend only supports DirectX12");
+            warning(config, line, "Rendering.Backend supports DirectX12 and Vulkan");
         return;
     }
     if (key == "internalresolutionmode" || key == "internalmode") {
@@ -248,7 +250,7 @@ void apply_rendering_key(LcsConfiguration &config, const std::string &key,
     }
     if (key == "dx12gecolor" || key == "directx12gecolor" || key == "nativege") {
         if (!parse_bool(value, config.rendering.dx12_ge_color))
-            warning(config, line, "Rendering.DX12GEColor expects true/false");
+            warning(config, line, "Rendering.NativeGE expects true/false");
         return;
     }
     if (key == "texturecacheentries" || key == "texturecachelimit") {
@@ -647,9 +649,10 @@ void initialize_lcs_render_configuration(const std::filesystem::path &executable
                               std::to_string(config.timing.realtime_speed_interval_vblanks));
     }
     if (std::getenv("PSPRECOMP_GE_BACKEND") == nullptr) {
-        set_environment_value("PSPRECOMP_GE_BACKEND",
-                              config.rendering.backend == RenderingBackend::DirectX12
-                                  ? "directx12" : "software");
+        const char *backend_name = "software";
+        if (config.rendering.backend == RenderingBackend::DirectX12) backend_name = "directx12";
+        else if (config.rendering.backend == RenderingBackend::Vulkan) backend_name = "vulkan";
+        set_environment_value("PSPRECOMP_GE_BACKEND", backend_name);
     }
     const InternalResolutionDimensions internal =
         resolve_internal_resolution(config.rendering);
@@ -721,6 +724,7 @@ const char *rendering_backend_name(RenderingBackend backend) noexcept {
     switch (backend) {
     case RenderingBackend::Software: return "Software";
     case RenderingBackend::DirectX12: return "DirectX 12";
+    case RenderingBackend::Vulkan: return "Vulkan";
     }
     return "Unknown";
 }

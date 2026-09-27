@@ -12,6 +12,7 @@ namespace lcs {
 enum class GeGpuBackendKind : std::uint8_t {
     Software,
     DirectX12,
+    Vulkan,
 };
 
 struct GeGpuDrawDescriptor {
@@ -281,9 +282,10 @@ struct GeGpuBackendReport {
     std::uint64_t evicted_textures{};
     std::uint64_t recycled_texture_descriptor_sets{};
     std::uint64_t vram_feedback_refreshes{};
-    std::uint64_t dx12_native_framebuffer_targets{};
-    std::uint64_t dx12_gpu_feedback_draws{};
-    std::uint64_t dx12_self_feedback_snapshots{};
+    std::uint64_t native_framebuffer_targets{};
+    std::uint64_t gpu_feedback_draws{};
+    std::uint64_t self_feedback_snapshots{};
+    // DirectX 12 records these. The Vulkan backend leaves them untouched.
     std::uint32_t dx12_msaa_samples{1u};
     std::uint32_t dx12_depth_bits{32u};
     std::uint64_t dx12_resolves{};

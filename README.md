@@ -24,6 +24,28 @@ lcs\PLAY_LCS.bat
 
 Settings are in `lcs/config/LCSNative.ini`.
 
+## Linux
+
+The native build uses Vulkan for the GE and SDL2 for the window and
+audio. It needs `glslangValidator`, plus the Vulkan, SDL2, and FFmpeg
+development packages.
+
+```text
+lcs/scripts/build_linux.sh
+lcs/scripts/play_linux.sh
+```
+
+That build compiles `lcs/host/vulkan/ge.vert` and `ge.frag` to SPIR-V
+with `glslangValidator`. Editing either shader rebuilds it into
+`LCSNative`.
+
+`lcs/config/LCSNative.ini` is shared with Windows, so the checked-in
+setting stays `Backend=DirectX12`. On Linux that value selects the
+Vulkan GE. `Backend=Vulkan` selects it explicitly, and any other
+backend name keeps the software rasterizer. `LCS_VULKAN_VALIDATION=1`
+turns on the Khronos validation layer and prints its warnings and
+errors.
+
 ## License
 
 MIT, see [`LICENSE`](LICENSE). Third-party notices: [`lcs/THIRD_PARTY.md`](lcs/THIRD_PARTY.md).
