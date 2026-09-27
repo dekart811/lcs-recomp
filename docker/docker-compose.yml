@@ -1,0 +1,29 @@
+x-debian-version: &debian-version 13
+x-debian-image: &debian-image "lcs-native:debian-13"
+x-puid: &puid 1000
+x-pgid: &pgid 1000
+
+services:
+  build-archlinux:
+    image: "lcs-native:archlinux"
+    build:
+      context: "."
+      dockerfile: "archlinux.Dockerfile"
+      args:
+        PUID: *puid
+        PGID: *pgid
+    volumes:
+      - "../:/home/build/lcs-recomp/"
+      - "./ccache-archlinux/:/home/build/.ccache/"
+  build-debian:
+    image: *debian-image
+    build:
+      context: "."
+      dockerfile: "debian.Dockerfile"
+      args:
+        DEBIAN_VERSION: *debian-version
+        PUID: *puid
+        PGID: *pgid
+    volumes:
+      - "../:/home/build/lcs-recomp/"
+      - "./ccache-debian/:/home/build/.ccache/"
