@@ -24,11 +24,19 @@ lcs\PLAY_LCS.bat
 
 Settings are in `lcs/config/LCSNative.ini`.
 
+`Display.ResolutionMode` is the window (`PSP`, `Scale`, `Custom`, or
+`Desktop`). `Rendering.InternalResolutionMode` is the GE render
+target, with the same four choices. `Desktop` uses the monitor on
+Windows and on Linux. `Rendering.TextureLodBias` shifts texture mip
+selection; negative values keep textures sharper at a distance.
+
 ## Linux
 
 The native build uses Vulkan for the GE and SDL2 for the window and
 audio. It needs `glslangValidator`, plus the Vulkan, SDL2, and FFmpeg
-development packages.
+development packages. The Linux build also compiles a small tool that
+packs `lcs/host/font5x7.txt` into the F10 menu font. The Windows build
+does not run that step.
 
 ```text
 lcs/scripts/build_linux.sh

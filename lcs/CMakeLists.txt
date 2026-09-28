@@ -2,6 +2,7 @@ set(FFMPEG_LIBS avcodec avformat avutil swresample swscale)
 set(FFMPEG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg)
 
 file(GLOB HOST_SOURCES CONFIGURE_DEPENDS host/*.cpp)
+list(REMOVE_ITEM HOST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/host/pack_font5x7.cpp)
 add_executable(LCSNative ${HOST_SOURCES})
 target_include_directories(LCSNative PRIVATE host)
 if(WIN32)
@@ -59,6 +60,21 @@ else()
         VERBATIM)
     add_custom_target(lcs_ge_spirv DEPENDS ${LCS_GE_SPV_HEADER})
     add_dependencies(LCSNative lcs_ge_spirv)
+    # pack_font5x7 turns host/font5x7.txt into the F10 menu font. Windows skips this.
+    add_executable(lcs_pack_font5x7 host/pack_font5x7.cpp)
+    set_target_properties(lcs_pack_font5x7 PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    set(LCS_FONT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/host_font_5x7.hpp)
+    add_custom_command(
+        OUTPUT ${LCS_FONT_HEADER}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
+        COMMAND lcs_pack_font5x7 ${CMAKE_CURRENT_SOURCE_DIR}/host/font5x7.txt ${LCS_FONT_HEADER}
+        DEPENDS lcs_pack_font5x7 ${CMAKE_CURRENT_SOURCE_DIR}/host/font5x7.txt
+        COMMENT "Packing host menu font"
+        VERBATIM)
+    add_custom_target(lcs_host_font DEPENDS ${LCS_FONT_HEADER})
+    add_dependencies(LCSNative lcs_host_font)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/host/display_window_sdl.cpp
+        PROPERTIES OBJECT_DEPENDS ${LCS_FONT_HEADER})
     target_include_directories(LCSNative BEFORE PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/host/ge_gpu_backend_vulkan.cpp
         PROPERTIES OBJECT_DEPENDS ${LCS_GE_SPV_HEADER})
@@ -99,4 +115,17 @@ if(GENERATED_SOURCES)
     target_link_libraries(LCSNative PRIVATE lcs_generated)
 else()
     target_compile_definitions(LCSNative PRIVATE LCS_NO_GENERATED)
+endif()
+
+add_executable(lcs_host_menu_test
+    ${CMAKE_SOURCE_DIR}/tests/lcs_host_menu_test.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/lcs_display_menu.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/lcs_render_config.cpp)
+target_include_directories(lcs_host_menu_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/host
+    ${CMAKE_SOURCE_DIR}/include)
+if(WIN32)
+    target_link_libraries(lcs_host_menu_test PRIVATE user32)
+else()
+    target_link_libraries(lcs_host_menu_test PRIVATE PkgConfig::SDL2 Threads::Threads)
 endif()

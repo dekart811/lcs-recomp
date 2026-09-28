@@ -1988,6 +1988,8 @@ void present_frame(psprecomp::Runtime &rt, const PresentRequest &request) {
         vblanks_since_gpu_frame = 0u;
     } else if (holding_gpu_frame && ++vblanks_since_gpu_frame > 4u) {
         holding_gpu_frame = false;
+        std::cerr << "[present] gpu frame stopped, falling back to the guest buffer"
+                  << " vblank=" << request.vblank << '\n';
     }
 
     bool presented_gpu_frame = false;
@@ -2022,6 +2024,15 @@ void present_frame(psprecomp::Runtime &rt, const PresentRequest &request) {
         }
     }
     if (!presented_gpu_frame) {
+        static std::uint64_t missed = 0u;
+        ++missed;
+        if (missed <= 5u || (missed % 300u) == 0u) {
+            std::cerr << "[present] no gpu frame shown"
+                      << " missed=" << missed
+                      << " ready=" << gpu_frame_ready
+                      << " holding=" << holding_gpu_frame
+                      << " vblank=" << request.vblank << '\n';
+        }
         display_window_present(rt, present_buffer, present_stride, request.pixel_format,
                                present_width, present_height);
     }

@@ -74,6 +74,13 @@ int main(int argc, char **argv) {
         const std::uint32_t user_arena_start =
             static_cast<std::uint32_t>((image_end + 0xFFu) & ~0xFFull);
         lcs::display_window_init();
+        const lcs::DisplaySurfaceDimensions window_size = lcs::resolve_window_dimensions();
+        const lcs::InternalResolutionDimensions internal_size =
+            lcs::resolve_internal_resolution(lcs::lcs_render_configuration().rendering);
+        std::cerr << "[display] window=" << window_size.width << "x" << window_size.height
+                  << " internal=" << internal_size.width << "x" << internal_size.height
+                  << " view_distance=" << lcs::view_distance_scale()
+                  << " texture_lod_bias=" << lcs::rendering_texture_lod_bias() << "\n";
         lcs::install_profile(runtime, user_arena_start);
 
         std::string gpu_backend_error;

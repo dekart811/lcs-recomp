@@ -18,6 +18,7 @@ void display_window_present(psprecomp::Runtime &runtime, std::uint32_t frame_buf
 void display_window_present_rgba(std::span<const std::byte> rgba, std::uint32_t width,
                                  std::uint32_t height);
 void display_window_shutdown();
+void display_window_request_fullscreen(bool enabled) noexcept;
 
 struct HostInputState {
     std::uint32_t buttons{};

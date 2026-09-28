@@ -36,11 +36,8 @@ const GeGpuDrawDescriptor *find_target(std::uint32_t address) noexcept {
 }
 
 bool enabled() noexcept {
-    static const bool value = [] {
-        const LcsConfiguration &config = lcs_render_configuration();
-        return config.initialized && config.display.show_fps;
-    }();
-    return value;
+    // The host window draws the counter. This path would paint a second one into the game image.
+    return false;
 }
 
 struct Glyph {

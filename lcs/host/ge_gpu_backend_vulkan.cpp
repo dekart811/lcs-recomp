@@ -162,6 +162,7 @@ struct VulkanState {
     std::unordered_map<std::uint64_t, VkSampler> sampler_cache{};
     bool sampler_anisotropy{};
     float max_sampler_anisotropy{1.0f};
+    float max_sampler_lod_bias{2.0f};
     std::unordered_map<std::uint64_t, Texture> textures{};
     std::unordered_map<std::uint32_t, Target> targets{};
     std::vector<Staging> staging;
@@ -365,6 +366,12 @@ void destroy_image(VulkanState &s, GpuImage &image) noexcept {
     image = {};
 }
 
+float sampler_lod_bias(const VulkanState &s, const GeGpuDrawDescriptor &draw) noexcept {
+    const float bias = static_cast<float>(draw.texture_level_offset16) / 16.0f + rendering_texture_lod_bias();
+    const float limit = s.max_sampler_lod_bias > 0.0f ? s.max_sampler_lod_bias : 2.0f;
+    return std::clamp(bias, -limit, limit);
+}
+
 VkSampler make_sampler(VulkanState &s, const GeGpuDrawDescriptor &draw) {
     VkSamplerCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -377,6 +384,7 @@ VkSampler make_sampler(VulkanState &s, const GeGpuDrawDescriptor &draw) {
     info.addressModeV = draw.texture_clamp_v ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
                                              : VK_SAMPLER_ADDRESS_MODE_REPEAT;
     info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    info.mipLodBias = sampler_lod_bias(s, draw);
     info.maxLod = 16.0f;
     VkSampler sampler{};
     if (vkCreateSampler(s.device, &info, nullptr, &sampler) != VK_SUCCESS) return VK_NULL_HANDLE;
@@ -485,7 +493,7 @@ VkSampler sampler_for(VulkanState &s, const GeGpuDrawDescriptor &draw) {
     info.addressModeV = draw.texture_clamp_v ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
                                              : VK_SAMPLER_ADDRESS_MODE_REPEAT;
     info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    info.mipLodBias = static_cast<float>(draw.texture_level_offset16) / 16.0f;
+    info.mipLodBias = sampler_lod_bias(s, draw);
     info.minLod = 0.0f;
     info.maxLod = static_cast<float>(std::max<std::uint32_t>(1u, draw.texture_max_level + 1u));
     if (draw.texture_level_mode == 1u) {
@@ -1338,6 +1346,7 @@ bool create_backend(VulkanState &s, std::string &error) {
     vkGetPhysicalDeviceProperties(s.physical, &device_properties);
     s.uniform_align = std::max<std::uint32_t>(
         kUniformAlign, static_cast<std::uint32_t>(device_properties.limits.minUniformBufferOffsetAlignment));
+    s.max_sampler_lod_bias = std::max(2.0f, device_properties.limits.maxSamplerLodBias);
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info{};
     queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -1921,6 +1930,19 @@ void ge_gpu_backend_display_logical_size(std::uint32_t &width, std::uint32_t &he
     height = s.display_logical_height;
 }
 
+void log_frame_failure(const VulkanState &s, const char *step, VkResult result) noexcept {
+    static std::uint64_t failures = 0u;
+    ++failures;
+    if (failures > 5u && (failures % 300u) != 0u) return;
+    std::cerr << "[vulkan] " << step << " result=" << static_cast<int>(result)
+              << " failures=" << failures
+              << " batches=" << s.batches.size()
+              << " textures=" << s.textures.size()
+              << " descriptor_sets=" << s.descriptor_sets_live
+              << " staging=" << s.staging.size()
+              << " display_fb=" << std::hex << s.display_framebuffer << std::dec << '\n';
+}
+
 bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     VulkanState &s = state();
     std::lock_guard<std::recursive_mutex> guard(s.mutex);
@@ -1935,6 +1957,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     const std::size_t vertex_bytes = s.vertices.size() * sizeof(UploadVertex);
     const std::size_t index_bytes = s.indices.size() * sizeof(std::uint32_t);
     if (vertex_bytes + index_bytes > kGeometryUploadCapacity) {
+        log_frame_failure(s, "geometry upload overflow", VK_ERROR_OUT_OF_DEVICE_MEMORY);
         ++s.report.game_vertex_overflows;
         s.vertices.clear();
         s.indices.clear();
@@ -1951,7 +1974,11 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(s.command, &begin) != VK_SUCCESS) {
+    const VkResult reset = vkResetCommandBuffer(s.command, 0);
+    if (reset != VK_SUCCESS) log_frame_failure(s, "vkResetCommandBuffer", reset);
+    const VkResult begun = reset == VK_SUCCESS ? vkBeginCommandBuffer(s.command, &begin) : reset;
+    if (begun != VK_SUCCESS) {
+        log_frame_failure(s, "vkBeginCommandBuffer", begun);
         s.vertices.clear();
         s.indices.clear();
         s.batches.clear();
@@ -2135,19 +2162,27 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
         transition_image(s.command, display->color.image, display->color.layout,
                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 1u);
     }
-    const bool submitted = vkEndCommandBuffer(s.command) == VK_SUCCESS;
+    const VkResult ended = vkEndCommandBuffer(s.command);
+    if (ended != VK_SUCCESS) log_frame_failure(s, "vkEndCommandBuffer", ended);
     bool readback = false;
-    if (submitted) {
+    if (ended == VK_SUCCESS) {
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.commandBufferCount = 1u;
         submit.pCommandBuffers = &s.command;
-        if (vkQueueSubmit(s.queue, 1u, &submit, VK_NULL_HANDLE) == VK_SUCCESS &&
-            vkQueueWaitIdle(s.queue) == VK_SUCCESS && display_ready && s.readback_mapped != nullptr) {
+        const VkResult queued = vkQueueSubmit(s.queue, 1u, &submit, VK_NULL_HANDLE);
+        if (queued != VK_SUCCESS) log_frame_failure(s, "vkQueueSubmit", queued);
+        const VkResult waited = queued == VK_SUCCESS ? vkQueueWaitIdle(s.queue) : queued;
+        if (queued == VK_SUCCESS && waited != VK_SUCCESS) log_frame_failure(s, "vkQueueWaitIdle", waited);
+        if (queued == VK_SUCCESS && waited == VK_SUCCESS && display_ready && s.readback_mapped != nullptr) {
             const std::size_t row = static_cast<std::size_t>(s.target_width) * 4u;
             s.frame_rgba.resize(row * s.target_height);
             std::memcpy(s.frame_rgba.data(), s.readback_mapped, s.frame_rgba.size());
             readback = true;
+        } else if (queued == VK_SUCCESS && waited == VK_SUCCESS && !display_ready) {
+            log_frame_failure(s, "display target was not drawn", VK_SUCCESS);
+        } else if (queued == VK_SUCCESS && waited == VK_SUCCESS && s.readback_mapped == nullptr) {
+            log_frame_failure(s, "readback memory is not mapped", VK_ERROR_MEMORY_MAP_FAILED);
         }
     }
     for (Staging &staging : s.staging) {

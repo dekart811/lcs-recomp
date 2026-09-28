@@ -31,6 +31,16 @@ float4 PresentPS(PresentVertexOutput i) : SV_TARGET {
             sum += PresentTexture0.SampleLevel(PresentSampler, origin + tap_step * float2(x, y), 0.0);
     return sum / float(taps.x * taps.y);
 }
+struct OverlayInput { float2 position : POSITION; float2 uv : TEXCOORD0; };
+PresentVertexOutput OverlayVS(OverlayInput input) {
+    PresentVertexOutput o;
+    o.position = float4(input.position, 0.0, 1.0);
+    o.uv = input.uv;
+    return o;
+}
+float4 OverlayPS(PresentVertexOutput i) : SV_TARGET {
+    return PresentTexture0.SampleLevel(PresentSampler, i.uv, 0.0);
+}
 )PRESENT_HLSL";
 
 }

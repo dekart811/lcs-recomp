@@ -43,11 +43,8 @@ bool modern_scheme() noexcept {
 }  // namespace
 
 bool lcs_frame_limiter_unlocked() noexcept {
-    static const bool value = [] {
-        const LcsConfiguration &config = lcs_render_configuration();
-        return config.initialized && config.timing.frame_rate > 30u;
-    }();
-    return value;
+    const LcsConfiguration &config = lcs_render_configuration();
+    return config.initialized && config.timing.frame_rate > 30u;
 }
 
 static bool mouse_camera_active() noexcept {

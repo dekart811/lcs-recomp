@@ -4,6 +4,7 @@
 #include "ge_gpu_backend.hpp"
 #include "lcs_mouse.hpp"
 #include "lcs_controls.hpp"
+#include "lcs_display_menu.hpp"
 #include "lcs_render_config.hpp"
 
 #if defined(_WIN32)
@@ -16,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <cmath>
 #include <cstdlib>
 #include <mutex>
@@ -34,6 +36,12 @@ std::uint32_t g_pixel_height{};
 std::atomic<int> g_wheel{0};
 std::atomic<std::int32_t> g_mouse_dx{0};
 std::atomic<std::int32_t> g_mouse_dy{0};
+
+void discard_pending_pointer() noexcept {
+    g_wheel.store(0, std::memory_order_relaxed);
+    g_mouse_dx.store(0, std::memory_order_relaxed);
+    g_mouse_dy.store(0, std::memory_order_relaxed);
+}
 
 constexpr std::uint32_t kPspSelect = 0x000001u;
 constexpr std::uint32_t kPspStart = 0x000008u;
@@ -182,10 +190,121 @@ void set_fullscreen(HWND hwnd, bool fullscreen) noexcept {
     g_fullscreen = fullscreen;
 }
 
+void note_host_frame() noexcept {
+    host_fps_note_presented_frame();
+}
+
+void paint_host_overlay(HDC hdc) noexcept {
+    if (hdc == nullptr || g_window == nullptr) return;
+    RECT client{};
+    GetClientRect(g_window, &client);
+    const int client_w = client.right - client.left;
+    const int client_h = client.bottom - client.top;
+    if (client_w <= 0 || client_h <= 0) return;
+    const int font_h = std::max(16, client_h / 36);
+    HFONT font = CreateFontW(-font_h, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HGDIOBJ previous = SelectObject(hdc, font);
+    SetBkMode(hdc, TRANSPARENT);
+    if (lcs_render_configuration().display.show_fps) {
+        char label[24];
+        host_fps_format(label, sizeof(label));
+        RECT box{12, 12, 12 + font_h * 6, 12 + font_h + 10};
+        HBRUSH background = CreateSolidBrush(RGB(8, 12, 28));
+        FillRect(hdc, &box, background);
+        DeleteObject(background);
+        SetTextColor(hdc, RGB(232, 248, 255));
+        TextOutA(hdc, 18, 16, label, static_cast<int>(std::strlen(label)));
+    }
+    if (host_settings_open()) {
+        const HostSettingsView view = host_settings_view();
+        const int line = font_h + 8;
+        const int panel_w = font_h * 22;
+        const int panel_h = line * 10;
+        const int origin_x = std::max(12, client_w - panel_w - 12);
+        const int origin_y = 12;
+        RECT panel{origin_x, origin_y, origin_x + panel_w, origin_y + panel_h};
+        HBRUSH background = CreateSolidBrush(RGB(8, 12, 28));
+        FillRect(hdc, &panel, background);
+        DeleteObject(background);
+        SetTextColor(hdc, RGB(180, 200, 230));
+        TextOutA(hdc, origin_x + 12, origin_y + 8, "HOST SETTINGS", 13);
+        TextOutA(hdc, origin_x + 12, origin_y + 8 + line, "F10 CLOSE", 9);
+        for (int row = 0; row < 5; ++row) {
+            const int y = origin_y + 8 + line * (2 + row);
+            if (row == view.selected) {
+                RECT highlight{origin_x + 6, y - 2, origin_x + panel_w - 6, y + font_h + 4};
+                HBRUSH brush = CreateSolidBrush(RGB(40, 70, 120));
+                FillRect(hdc, &highlight, brush);
+                DeleteObject(brush);
+                SetTextColor(hdc, RGB(255, 255, 255));
+            } else {
+                SetTextColor(hdc, RGB(170, 190, 220));
+            }
+            TextOutA(hdc, origin_x + 12, y, view.rows[row], static_cast<int>(std::strlen(view.rows[row])));
+        }
+        if (view.resolution_pending) {
+            SetTextColor(hdc, RGB(220, 180, 80));
+            TextOutA(hdc, origin_x + 12, origin_y + 8 + line * 7, "RESTART TO APPLY", 16);
+        }
+    }
+    SelectObject(hdc, previous);
+    DeleteObject(font);
+}
+
+void blit_stored_frame() noexcept {
+    if (g_window == nullptr || g_pixels.empty() || g_pixel_width == 0u || g_pixel_height == 0u) return;
+    HDC hdc = GetDC(g_window);
+    if (hdc == nullptr) return;
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = static_cast<LONG>(g_pixel_width);
+    info.bmiHeader.biHeight = -static_cast<LONG>(g_pixel_height);
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    RECT client{};
+    GetClientRect(g_window, &client);
+    SetStretchBltMode(hdc, HALFTONE);
+    SetBrushOrgEx(hdc, 0, 0, nullptr);
+    StretchDIBits(hdc, 0, 0, client.right - client.left, client.bottom - client.top, 0, 0,
+                 static_cast<int>(g_pixel_width), static_cast<int>(g_pixel_height), g_pixels.data(),
+                 &info, DIB_RGB_COLORS, SRCCOPY);
+    paint_host_overlay(hdc);
+    ReleaseDC(g_window, hdc);
+}
+
 LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-    if (message == WM_KEYDOWN && wparam == VK_F11 && (lparam & (1 << 30)) == 0) {
-        set_fullscreen(hwnd, !g_fullscreen);
+    const Win32HostKeyDecision host_key = classify_win32_host_key(
+        static_cast<std::uint32_t>(message), static_cast<std::uint32_t>(wparam),
+        (lparam & (1 << 30)) != 0);
+    if (host_key.consume) {
+        if (host_key.toggle_settings) {
+            const bool was_open = host_settings_open();
+            host_settings_handle(HostSettingsKey::Toggle);
+            if (was_open) discard_pending_pointer();
+        }
         return 0;
+    }
+    if (message == WM_KEYDOWN) {
+        const bool repeat = (lparam & (1 << 30)) != 0;
+        if (wparam == VK_F11 && !repeat) {
+            set_fullscreen(hwnd, !g_fullscreen);
+            host_settings_note_fullscreen(g_fullscreen);
+            return 0;
+        }
+        if (host_settings_open()) {
+            if (wparam == VK_UP) host_settings_handle(HostSettingsKey::Up);
+            else if (wparam == VK_DOWN) host_settings_handle(HostSettingsKey::Down);
+            else if (wparam == VK_LEFT) host_settings_handle(HostSettingsKey::Left);
+            else if (wparam == VK_RIGHT) host_settings_handle(HostSettingsKey::Right);
+            else if (wparam == VK_ESCAPE && !repeat) {
+                host_settings_handle(HostSettingsKey::Close);
+                discard_pending_pointer();
+            }
+            return 0;
+        }
     }
     if (message == WM_ACTIVATE) {
         update_cursor_clip(hwnd, LOWORD(wparam) != WA_INACTIVE && HIWORD(wparam) == 0);
@@ -209,7 +328,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                                 sizeof(RAWINPUTHEADER)) == size) {
                 const RAWINPUT *raw = reinterpret_cast<const RAWINPUT *>(buffer);
                 if (raw->header.dwType == RIM_TYPEMOUSE &&
-                    (raw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0) {
+                    (raw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 &&
+                    !host_settings_open()) {
                     g_mouse_dx.fetch_add(raw->data.mouse.lLastX, std::memory_order_relaxed);
                     g_mouse_dy.fetch_add(raw->data.mouse.lLastY, std::memory_order_relaxed);
                 }
@@ -223,7 +343,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         return TRUE;
     }
     if (message == WM_MOUSEWHEEL) {
-        g_wheel.fetch_add(GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA, std::memory_order_relaxed);
+        if (!host_settings_open())
+            g_wheel.fetch_add(GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA, std::memory_order_relaxed);
         return 0;
     }
     if (message == WM_DESTROY || message == WM_CLOSE) {
@@ -280,14 +401,10 @@ void display_window_init() {
     wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
     wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
     RegisterClassW(&wc);
-    int scale = 2;
-    if (const char *text = std::getenv("LCS_WINDOW_SCALE")) {
-        const int parsed = std::atoi(text);
-        if (parsed >= 1 && parsed <= 8) scale = parsed;
-    }
+    const DisplaySurfaceDimensions surface = resolve_window_dimensions();
     g_window = CreateWindowExW(0, wc.lpszClassName, L"LCSNative - GTA: Liberty City Stories",
                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                               480 * scale, 272 * scale,
+                               static_cast<int>(surface.width), static_cast<int>(surface.height),
                                nullptr, nullptr, wc.hInstance, nullptr);
     if (g_window == nullptr) return;
 
@@ -303,10 +420,10 @@ void display_window_init() {
     const int work_width = static_cast<int>(work.right - work.left);
     const int work_height = static_cast<int>(work.bottom - work.top);
 
-    const int client_width =
-        std::clamp(480 * scale, 1, std::max(1, work_width - frame_width));
-    const int client_height =
-        std::clamp(272 * scale, 1, std::max(1, work_height - frame_height));
+    const int client_width = std::clamp(static_cast<int>(surface.width), 1,
+                                        std::max(1, work_width - frame_width));
+    const int client_height = std::clamp(static_cast<int>(surface.height), 1,
+                                         std::max(1, work_height - frame_height));
     const int window_width = client_width + frame_width;
     const int window_height = client_height + frame_height;
 
@@ -335,7 +452,20 @@ bool display_window_profile_key_pressed() {
 
 bool display_window_closed() { return g_closed; }
 
+std::atomic<int> g_fullscreen_request{-1};
+
+void apply_fullscreen_request() noexcept {
+    const int request = g_fullscreen_request.exchange(-1, std::memory_order_relaxed);
+    if (request < 0 || g_window == nullptr) return;
+    set_fullscreen(g_window, request != 0);
+}
+
+void display_window_request_fullscreen(bool enabled) noexcept {
+    g_fullscreen_request.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
 void display_window_pump() {
+    apply_fullscreen_request();
     if (g_window == nullptr) return;
     MSG msg;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -395,6 +525,8 @@ void display_window_present(psprecomp::Runtime &runtime, std::uint32_t frame_buf
     StretchDIBits(hdc, 0, 0, client.right - client.left, client.bottom - client.top,
                  0, 0, static_cast<int>(width), static_cast<int>(height),
                  g_pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+    note_host_frame();
+    paint_host_overlay(hdc);
     ReleaseDC(g_window, hdc);
 }
 
@@ -438,6 +570,8 @@ void display_window_present_rgba(std::span<const std::byte> rgba, std::uint32_t 
     StretchDIBits(hdc, 0, 0, client.right - client.left, client.bottom - client.top,
                   0, 0, static_cast<int>(width), static_cast<int>(height),
                   g_pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+    note_host_frame();
+    paint_host_overlay(hdc);
     ReleaseDC(g_window, hdc);
 }
 
@@ -455,10 +589,18 @@ HostInputState display_window_input() {
     static std::chrono::steady_clock::time_point cached_at{};
     const std::lock_guard<std::mutex> guard(cache_mutex);
     const auto poll_time = std::chrono::steady_clock::now();
+    if (host_settings_open()) discard_pending_pointer();
     if (cached_at.time_since_epoch().count() != 0 &&
         poll_time - cached_at < std::chrono::milliseconds(4))
         return cached;
     cached_at = poll_time;
+    if (host_settings_open()) {
+        discard_pending_pointer();
+        cached = {};
+        lcs_camera_set_axes(0, 0);
+        lcs_set_host_drive_inputs(false, false);
+        return cached;
+    }
 
     HostInputState input{};
     const auto publish = [&]() -> HostInputState {
