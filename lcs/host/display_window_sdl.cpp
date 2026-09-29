@@ -4,6 +4,7 @@
 
 #include "ge_gpu_backend.hpp"
 #include "lcs_controls.hpp"
+#include "lcs_menu.hpp"
 #include "lcs_mouse.hpp"
 #include "lcs_display_menu.hpp"
 #include "lcs_render_config.hpp"
@@ -523,12 +524,15 @@ HostInputState display_window_input() {
     const std::int32_t mouse_dx = g_mouse_dx.exchange(0, std::memory_order_relaxed);
     const std::int32_t mouse_dy = g_mouse_dy.exchange(0, std::memory_order_relaxed);
     const bool focused = g_window != nullptr && g_focused;
-    const bool in_game = lcs_camera_in_use();
+    const bool menu = lcs_menu_active();
+    const bool in_game = lcs_camera_in_use() && !menu;
     const bool minimized = g_window != nullptr &&
                            (SDL_GetWindowFlags(g_window) & SDL_WINDOW_MINIMIZED) != 0;
     const bool capture = focused && in_game && !minimized && lcs_camera_hook_enabled();
     if ((SDL_GetRelativeMouseMode() == SDL_TRUE) != capture)
         SDL_SetRelativeMouseMode(capture ? SDL_TRUE : SDL_FALSE);
+    if ((SDL_ShowCursor(SDL_QUERY) == SDL_ENABLE) != menu)
+        SDL_ShowCursor(menu ? SDL_ENABLE : SDL_DISABLE);
     const bool driving = lcs_player_in_vehicle();
     const ControlsConfiguration &controls = lcs_render_configuration().controls;
     if (focused) {

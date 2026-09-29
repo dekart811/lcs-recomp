@@ -1,7 +1,7 @@
 #include "ge_renderer.hpp"
 #include "ge_gpu_backend.hpp"
-#include "lcs_controls.hpp"
 #include "lcs_fps_overlay.hpp"
+#include "lcs_menu.hpp"
 #include "lcs_render_config.hpp"
 
 #include "psprecomp/common.hpp"
@@ -4527,8 +4527,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             !(setup.texture_enabled && ge_gpu_backend_is_framebuffer_feedback_texture(gpu_draw));
 
         const float hud_scale = lcs_hud_scale();
-        if (hud_candidate && hud_scale < 1.0f &&
-            (lcs_camera_in_use() || !lcs_camera_hook_enabled())) {
+        if (hud_candidate && hud_scale < 1.0f && !lcs_menu_command()) {
             std::uint32_t logical_width = 480u;
             std::uint32_t logical_height = 272u;
             ge_gpu_backend_display_logical_size(logical_width, logical_height);

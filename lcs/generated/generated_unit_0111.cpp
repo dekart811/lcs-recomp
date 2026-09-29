@@ -1,6 +1,7 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
 #include "lcs_widescreen.hpp"
+#include "lcs_menu.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -7155,11 +7156,13 @@ L_089C2F40:
       goto L_089C2F60;
     }
 L_089C2F60:
+    lcs::lcs_menu_begin();
     ctx.gpr[31] = (0x089C2F68u);
     ctx.gpr[4] = (ctx.gpr[6] | 0u);
     if (rt.invoke_chained_direct<&recomp_unit_0182_entry, 182u, 767u, 0x08ADEE88u>(ctx, &aot_mem) && ctx.pc == 0x089C2F68u) goto L_089C2F68;
     return;
 L_089C2F68:
+    lcs::lcs_menu_end();
     ctx.gpr[6] = (2230u << 16u);
     ctx.gpr[6] = (aot_mem.aot_load32(ctx.gpr[6] + static_cast<std::uint32_t>(-25816)));
     ctx.gpr[4] = (0u | 6u);

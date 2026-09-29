@@ -5,6 +5,7 @@
 #include "lcs_mouse.hpp"
 #include "lcs_controls.hpp"
 #include "lcs_display_menu.hpp"
+#include "lcs_menu.hpp"
 #include "lcs_render_config.hpp"
 
 #if defined(_WIN32)
@@ -337,8 +338,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
-    if (message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT && lcs_camera_hook_enabled() &&
-        lcs_camera_in_use()) {
+    if (message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT && !lcs_menu_active()) {
         SetCursor(nullptr);
         return TRUE;
     }
@@ -614,7 +614,7 @@ HostInputState display_window_input() {
     const std::int32_t mouse_dy = g_mouse_dy.exchange(0, std::memory_order_relaxed);
     const bool focused = g_window != nullptr && GetForegroundWindow() == g_window;
     static bool was_captured = false;
-    const bool in_game = lcs_camera_in_use();
+    const bool in_game = lcs_camera_in_use() && !lcs_menu_active();
     const bool moving_window = focused && (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 &&
                                GetCapture() != nullptr;
     const bool capture = focused && in_game && !moving_window && !IsIconic(g_window);

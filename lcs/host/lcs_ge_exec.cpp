@@ -1,6 +1,7 @@
 #include "lcs_ge_exec.hpp"
 
 #include "ge_renderer.hpp"
+#include "lcs_menu.hpp"
 #include "psprecomp/common.hpp"
 
 #include <array>
@@ -98,6 +99,7 @@ void execute_ge_list_rendered(psprecomp::GuestMemory &memory, std::uint32_t list
         case 0x04u: {
             GeRenderStats stats{};
             std::string error;
+            lcs_set_ge_command(op_pc);
             if (!render_ge_primitive(memory, ge_commands, ge_transform, ge_vertex_address,
                                      ge_index_address, data, stats, error, 1u, 0u, 0u, 0u,
                                      diag)) {

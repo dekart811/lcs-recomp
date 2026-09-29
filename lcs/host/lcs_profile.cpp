@@ -10,6 +10,7 @@
 #include "lcs_fps_overlay.hpp"
 #include "lcs_frame_limit.hpp"
 #include "lcs_lang.hpp"
+#include "lcs_menu.hpp"
 
 #include "psprecomp/common.hpp"
 
@@ -2372,6 +2373,7 @@ void dump_pc_profile() {
 
 void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start) {
     thread_table = ThreadTable{};
+    lcs_menu_init(runtime);
 
     ThreadRecord module_thread{};
     module_thread.name = "module_start";
@@ -3986,6 +3988,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 list_finished = scan.finished;
                 finish_argument = scan.finish_argument;
             } else if (ge_worker_wait_idle(); ge_async_enabled()) {
+                lcs_menu_enqueue();
                 const GeListPrescan scan = prescan_ge_list(rt.memory(), list_address);
                 list_finished = scan.finished;
                 finish_argument = scan.finish_argument;
@@ -3997,6 +4000,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                         std::chrono::steady_clock::now() - list_started).count());
                 });
             } else {
+                lcs_menu_enqueue();
                 const auto list_started = std::chrono::steady_clock::now();
                 execute_ge_list_frame(rt, list_address, display_vblank_index);
                 g_speed_ge_list_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
