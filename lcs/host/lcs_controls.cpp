@@ -132,6 +132,21 @@ float lcs_mouse_camera_pitch_angle(float game_angle) noexcept {
     return mouse_camera_angle(g_mouse_camera_dy, pitch_sign(), game_angle);
 }
 
+static float mouse_aim_angle(std::atomic<std::int32_t> &counts, float sign, float game_angle,
+                             float fov) noexcept {
+    if (!mouse_camera_active()) return game_angle;
+    const float zoom = fov > 0.0f ? fov / 80.0f : 1.0f;
+    return take_mouse_angle(counts, sign) * zoom;
+}
+
+float lcs_mouse_aim_turn_angle(float game_angle, float fov) noexcept {
+    return mouse_aim_angle(g_mouse_camera_dx, -1.0f, game_angle, fov);
+}
+
+float lcs_mouse_aim_pitch_angle(float game_angle, float fov) noexcept {
+    return mouse_aim_angle(g_mouse_camera_dy, pitch_sign(), game_angle, fov);
+}
+
 bool lcs_camera_hook_enabled() noexcept {
     static const bool value = [] {
         const LcsConfiguration &config = lcs_render_configuration();

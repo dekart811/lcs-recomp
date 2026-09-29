@@ -12,6 +12,10 @@ namespace lcs {
 
 [[nodiscard]] float lcs_mouse_camera_pitch_angle(float game_angle) noexcept;
 
+[[nodiscard]] float lcs_mouse_aim_turn_angle(float game_angle, float fov) noexcept;
+
+[[nodiscard]] float lcs_mouse_aim_pitch_angle(float game_angle, float fov) noexcept;
+
 [[nodiscard]] float lcs_mouse_vehicle_camera_axis_x(float game_axis) noexcept;
 
 [[nodiscard]] float lcs_mouse_vehicle_camera_axis_y(float game_axis) noexcept;
