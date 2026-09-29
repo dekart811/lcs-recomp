@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
+#include "lcs_render_config.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -7025,6 +7026,8 @@ L_088735A0:
     ctx.gpr[16] = (ctx.gpr[4] | 0u);
     aot_mem.aot_store32(ctx.gpr[29] + static_cast<std::uint32_t>(20), ctx.gpr[31]);
     ctx.gpr[31] = (0x088735B8u);
+    // RwCamera far clip at +132.
+    ctx.fpr[12] = ctx.fpr[12] * lcs::view_distance_scale();
     aot_mem.aot_store32(ctx.gpr[16] + static_cast<std::uint32_t>(132), std::bit_cast<std::uint32_t>(ctx.fpr[12]));
     goto L_08873290;
 L_088735B8:
@@ -7394,6 +7397,8 @@ L_08873928:
     ctx.pc = jump_target;
     return;
 L_08873948:
+    // RwCamera fog plane at +136.
+    ctx.fpr[12] = ctx.fpr[12] * lcs::view_distance_scale();
     aot_mem.aot_store32(ctx.gpr[4] + static_cast<std::uint32_t>(136), std::bit_cast<std::uint32_t>(ctx.fpr[12]));
     jump_target = ctx.gpr[31];
     ctx.gpr[2] = (ctx.gpr[4] | 0u);

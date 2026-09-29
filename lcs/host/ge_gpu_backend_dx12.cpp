@@ -1,5 +1,6 @@
 #include "ge_gpu_backend.hpp"
 #include "ge_present_shader.hpp"
+#include "lcs_display_menu.hpp"
 #include "lcs_render_config.hpp"
 #include "lcs_runtime_log.hpp"
 
@@ -111,6 +112,20 @@ struct Dx12FrameResources {
     ComPtr<ID3D12Resource> texture_upload_buffer;
     std::byte *mapped_texture_upload{};
     std::size_t texture_upload_cursor{};
+    ComPtr<ID3D12Resource> settings_upload;
+    std::byte *settings_upload_mapped{};
+    ComPtr<ID3D12Resource> settings_vertices;
+    std::byte *settings_vertices_mapped{};
+    ComPtr<ID3D12Resource> settings_texture;
+    D3D12_RESOURCE_STATES settings_texture_state{D3D12_RESOURCE_STATE_COPY_DEST};
+    UINT settings_srv{};
+    ComPtr<ID3D12Resource> fps_upload;
+    std::byte *fps_upload_mapped{};
+    ComPtr<ID3D12Resource> fps_vertices;
+    std::byte *fps_vertices_mapped{};
+    ComPtr<ID3D12Resource> fps_texture;
+    D3D12_RESOURCE_STATES fps_texture_state{D3D12_RESOURCE_STATE_COPY_DEST};
+    UINT fps_srv{};
     UINT64 fence_value{};
     std::vector<ComPtr<ID3D12Resource>> transient_resources;
 };
@@ -229,6 +244,9 @@ struct Dx12GeState {
     ComPtr<ID3D12PipelineState> present_pipeline;
     ComPtr<ID3DBlob> present_vertex_shader;
     ComPtr<ID3DBlob> present_pixel_shader;
+    ComPtr<ID3D12PipelineState> settings_pipeline;
+    ComPtr<ID3DBlob> settings_vertex_shader;
+    ComPtr<ID3DBlob> settings_pixel_shader;
     bool direct_present_ok{};
     std::uint32_t presented_framebuffer{};
     std::uint32_t missed_display_intervals{};
@@ -1014,6 +1032,22 @@ float4 PSMain(VSOut input) : SV_TARGET {
                        : hr_text(hr, "D3DCompile(DX12 GE Present PS)");
         return false;
     }
+    errors.Reset();
+    hr = D3DCompile(present, std::strlen(present), "LCSNativeDX12GEPresent", nullptr, nullptr,
+                    "OverlayVS", "vs_5_1", flags, 0u, &s.settings_vertex_shader, &errors);
+    if (FAILED(hr)) {
+        error = errors ? std::string(static_cast<const char *>(errors->GetBufferPointer()), errors->GetBufferSize())
+                       : hr_text(hr, "D3DCompile(DX12 GE settings VS)");
+        return false;
+    }
+    errors.Reset();
+    hr = D3DCompile(present, std::strlen(present), "LCSNativeDX12GEPresent", nullptr, nullptr,
+                    "OverlayPS", "ps_5_1", flags, 0u, &s.settings_pixel_shader, &errors);
+    if (FAILED(hr)) {
+        error = errors ? std::string(static_cast<const char *>(errors->GetBufferPointer()), errors->GetBufferSize())
+                       : hr_text(hr, "D3DCompile(DX12 GE settings PS)");
+        return false;
+    }
     return true;
 }
 
@@ -1485,7 +1519,9 @@ std::uint32_t ensure_sampler(Dx12GeState &s, const GeGpuDrawDescriptor &draw) no
     sampler.AddressU = draw.texture_clamp_u ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     sampler.AddressV = draw.texture_clamp_v ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.MipLODBias = static_cast<float>(draw.texture_level_offset16) / 16.0f;
+    sampler.MipLODBias = std::clamp(
+        static_cast<float>(draw.texture_level_offset16) / 16.0f + rendering_texture_lod_bias(),
+        -16.0f, 16.0f);
     sampler.MaxAnisotropy = std::clamp(lcs_render_configuration().rendering.anisotropic_filtering, 1u, 16u);
     sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     sampler.MinLOD = 0.0f;
@@ -1520,6 +1556,28 @@ bool create_present_pipeline(Dx12GeState &s, std::string &error) noexcept {
     const HRESULT hr = s.device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&s.present_pipeline));
     if (FAILED(hr)) {
         error = hr_text(hr, "CreateGraphicsPipelineState(DX12 GE present)");
+        return false;
+    }
+    D3D12_INPUT_ELEMENT_DESC elements[]{
+        {"POSITION", 0u, DXGI_FORMAT_R32G32_FLOAT, 0u, 0u, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0u},
+        {"TEXCOORD", 0u, DXGI_FORMAT_R32G32_FLOAT, 0u, 8u, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0u},
+    };
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC overlay = pso;
+    overlay.VS = {s.settings_vertex_shader->GetBufferPointer(), s.settings_vertex_shader->GetBufferSize()};
+    overlay.PS = {s.settings_pixel_shader->GetBufferPointer(), s.settings_pixel_shader->GetBufferSize()};
+    overlay.InputLayout.pInputElementDescs = elements;
+    overlay.InputLayout.NumElements = 2u;
+    overlay.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    overlay.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    overlay.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    overlay.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    overlay.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    overlay.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    overlay.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    overlay.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    const HRESULT overlay_hr = s.device->CreateGraphicsPipelineState(&overlay, IID_PPV_ARGS(&s.settings_pipeline));
+    if (FAILED(overlay_hr)) {
+        error = hr_text(overlay_hr, "CreateGraphicsPipelineState(DX12 GE settings)");
         return false;
     }
     return true;
@@ -1622,8 +1680,302 @@ std::uint32_t present_sampler(Dx12GeState &s) noexcept {
 
 
 
+struct SettingsVertex {
+    float x, y, u, v;
+};
+
+bool ensure_settings_frame(Dx12GeState &s, Dx12FrameResources &frame, std::string &error) noexcept {
+    if (frame.settings_texture && frame.settings_upload && frame.settings_upload_mapped != nullptr &&
+        frame.settings_vertices && frame.settings_vertices_mapped != nullptr && frame.settings_srv != 0u)
+        return true;
+    D3D12_RESOURCE_DESC texture{};
+    texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture.Width = kSettingsOverlayWidth;
+    texture.Height = kSettingsOverlayHeight;
+    texture.DepthOrArraySize = 1u;
+    texture.MipLevels = 1u;
+    texture.Format = kColorFormat;
+    texture.SampleDesc.Count = 1u;
+    texture.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    D3D12_HEAP_PROPERTIES default_heap{};
+    default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    HRESULT hr = s.device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &texture,
+                                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                    IID_PPV_ARGS(&frame.settings_texture));
+    if (FAILED(hr)) {
+        error = hr_text(hr, "CreateCommittedResource(DX12 settings overlay)");
+        return false;
+    }
+    frame.settings_texture_state = D3D12_RESOURCE_STATE_COPY_DEST;
+    const UINT64 row_pitch = (static_cast<UINT64>(kSettingsOverlayWidth) * 4u + 255u) & ~UINT64{255u};
+    D3D12_RESOURCE_DESC upload{};
+    upload.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    upload.Width = row_pitch * kSettingsOverlayHeight;
+    upload.Height = 1u;
+    upload.DepthOrArraySize = 1u;
+    upload.MipLevels = 1u;
+    upload.Format = DXGI_FORMAT_UNKNOWN;
+    upload.SampleDesc.Count = 1u;
+    upload.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    D3D12_HEAP_PROPERTIES upload_heap{};
+    upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    hr = s.device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload,
+                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                            IID_PPV_ARGS(&frame.settings_upload));
+    if (FAILED(hr)) {
+        error = hr_text(hr, "CreateCommittedResource(DX12 settings upload)");
+        return false;
+    }
+    upload.Width = sizeof(SettingsVertex) * 6u;
+    hr = s.device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload,
+                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                            IID_PPV_ARGS(&frame.settings_vertices));
+    if (FAILED(hr)) {
+        error = hr_text(hr, "CreateCommittedResource(DX12 settings vertices)");
+        return false;
+    }
+    const D3D12_RANGE no_read{0u, 0u};
+    void *mapped = nullptr;
+    hr = frame.settings_upload->Map(0u, &no_read, &mapped);
+    if (FAILED(hr) || mapped == nullptr) {
+        error = hr_text(hr, "Map(DX12 settings upload)");
+        return false;
+    }
+    frame.settings_upload_mapped = static_cast<std::byte *>(mapped);
+    mapped = nullptr;
+    hr = frame.settings_vertices->Map(0u, &no_read, &mapped);
+    if (FAILED(hr) || mapped == nullptr) {
+        error = hr_text(hr, "Map(DX12 settings vertices)");
+        return false;
+    }
+    frame.settings_vertices_mapped = static_cast<std::byte *>(mapped);
+    frame.settings_srv = allocate_texture_srv(s);
+    if (frame.settings_srv == 0u) {
+        error = "DX12 settings overlay ran out of shader resource views";
+        return false;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = kColorFormat;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1u;
+    s.device->CreateShaderResourceView(frame.settings_texture.Get(), &srv,
+                                        srv_cpu(s, frame.settings_srv));
+    return true;
+}
+
+void composite_settings_overlay(Dx12GeState &s, const HostSettingsView &view) noexcept {
+    if (!s.settings_pipeline) return;
+    Dx12FrameResources &frame = s.frames[s.frame_cursor];
+    std::string error;
+    if (!ensure_settings_frame(s, frame, error)) {
+        runtime_log_error("dx12 settings overlay", error);
+        return;
+    }
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kSettingsOverlayWidth) *
+                                     kSettingsOverlayHeight * 4u);
+    rasterize_settings_overlay(view, pixels.data(), kSettingsOverlayWidth, kSettingsOverlayHeight);
+    const UINT row_pitch = (kSettingsOverlayWidth * 4u + 255u) & ~255u;
+    auto *destination = reinterpret_cast<std::uint8_t *>(frame.settings_upload_mapped);
+    for (std::uint32_t y = 0u; y < kSettingsOverlayHeight; ++y) {
+        std::memcpy(destination + static_cast<std::size_t>(y) * row_pitch,
+                    pixels.data() + static_cast<std::size_t>(y) * kSettingsOverlayWidth * 4u,
+                    kSettingsOverlayWidth * 4u);
+    }
+    transition(s.list.Get(), frame.settings_texture.Get(), frame.settings_texture_state,
+               D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = frame.settings_upload.Get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    source.PlacedFootprint.Footprint.Format = kColorFormat;
+    source.PlacedFootprint.Footprint.Width = kSettingsOverlayWidth;
+    source.PlacedFootprint.Footprint.Height = kSettingsOverlayHeight;
+    source.PlacedFootprint.Footprint.Depth = 1u;
+    source.PlacedFootprint.Footprint.RowPitch = row_pitch;
+    D3D12_TEXTURE_COPY_LOCATION destination_location{};
+    destination_location.pResource = frame.settings_texture.Get();
+    destination_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    s.list->CopyTextureRegion(&destination_location, 0u, 0u, 0u, &source, nullptr);
+    transition(s.list.Get(), frame.settings_texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    frame.settings_texture_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    const float swap_w = static_cast<float>(std::max<std::uint32_t>(1u, s.swap_width));
+    const float swap_h = static_cast<float>(std::max<std::uint32_t>(1u, s.swap_height));
+    const float panel_w = std::min(swap_w * 0.46f, static_cast<float>(kSettingsOverlayWidth));
+    const float panel_h = panel_w * (static_cast<float>(kSettingsOverlayHeight) /
+                                      static_cast<float>(kSettingsOverlayWidth));
+    const float x1 = 1.0f - 48.0f / swap_w;
+    const float x0 = x1 - 2.0f * panel_w / swap_w;
+    const float y1 = 1.0f - 48.0f / swap_h;
+    const float y0 = y1 - 2.0f * panel_h / swap_h;
+    const SettingsVertex vertices[6]{
+        {x0, y1, 0.0f, 0.0f}, {x1, y1, 1.0f, 0.0f}, {x0, y0, 0.0f, 1.0f},
+        {x0, y0, 0.0f, 1.0f}, {x1, y1, 1.0f, 0.0f}, {x1, y0, 1.0f, 1.0f},
+    };
+    std::memcpy(frame.settings_vertices_mapped, vertices, sizeof(vertices));
+    const D3D12_VIEWPORT viewport{0.0f, 0.0f, swap_w, swap_h, 0.0f, 1.0f};
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(s.swap_width), static_cast<LONG>(s.swap_height)};
+    s.list->RSSetViewports(1u, &viewport);
+    s.list->RSSetScissorRects(1u, &scissor);
+    s.list->SetPipelineState(s.settings_pipeline.Get());
+    s.list->SetGraphicsRootDescriptorTable(0u, srv_gpu(s, frame.settings_srv));
+    s.list->SetGraphicsRootDescriptorTable(1u, sampler_gpu(s, 0u));
+    D3D12_VERTEX_BUFFER_VIEW buffer{};
+    buffer.BufferLocation = frame.settings_vertices->GetGPUVirtualAddress();
+    buffer.SizeInBytes = sizeof(vertices);
+    buffer.StrideInBytes = sizeof(SettingsVertex);
+    s.list->IASetVertexBuffers(0u, 1u, &buffer);
+    s.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    s.list->DrawInstanced(6u, 1u, 0u, 0u);
+}
+
+bool ensure_fps_frame(Dx12GeState &s, Dx12FrameResources &frame, std::string &error) noexcept {
+    if (frame.fps_texture && frame.fps_upload && frame.fps_upload_mapped != nullptr &&
+        frame.fps_vertices && frame.fps_vertices_mapped != nullptr && frame.fps_srv != 0u)
+        return true;
+    D3D12_RESOURCE_DESC texture{};
+    texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture.Width = kFpsOverlayWidth;
+    texture.Height = kFpsOverlayHeight;
+    texture.DepthOrArraySize = 1u;
+    texture.MipLevels = 1u;
+    texture.Format = kColorFormat;
+    texture.SampleDesc.Count = 1u;
+    texture.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    D3D12_HEAP_PROPERTIES default_heap{};
+    default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    HRESULT hr = s.device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &texture,
+                                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                    IID_PPV_ARGS(&frame.fps_texture));
+    if (FAILED(hr)) {
+        error = hr_text(hr, "CreateCommittedResource(DX12 fps overlay)");
+        return false;
+    }
+    frame.fps_texture_state = D3D12_RESOURCE_STATE_COPY_DEST;
+    const UINT64 row_pitch = (static_cast<UINT64>(kFpsOverlayWidth) * 4u + 255u) & ~UINT64{255u};
+    D3D12_RESOURCE_DESC upload{};
+    upload.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    upload.Width = row_pitch * kFpsOverlayHeight;
+    upload.Height = 1u;
+    upload.DepthOrArraySize = 1u;
+    upload.MipLevels = 1u;
+    upload.Format = DXGI_FORMAT_UNKNOWN;
+    upload.SampleDesc.Count = 1u;
+    upload.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    D3D12_HEAP_PROPERTIES upload_heap{};
+    upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    hr = s.device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload,
+                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                            IID_PPV_ARGS(&frame.fps_upload));
+    if (FAILED(hr)) {
+        error = hr_text(hr, "CreateCommittedResource(DX12 fps upload)");
+        return false;
+    }
+    upload.Width = sizeof(SettingsVertex) * 6u;
+    hr = s.device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload,
+                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                            IID_PPV_ARGS(&frame.fps_vertices));
+    if (FAILED(hr)) {
+        error = hr_text(hr, "CreateCommittedResource(DX12 fps vertices)");
+        return false;
+    }
+    const D3D12_RANGE no_read{0u, 0u};
+    void *mapped = nullptr;
+    hr = frame.fps_upload->Map(0u, &no_read, &mapped);
+    if (FAILED(hr) || mapped == nullptr) {
+        error = hr_text(hr, "Map(DX12 fps upload)");
+        return false;
+    }
+    frame.fps_upload_mapped = static_cast<std::byte *>(mapped);
+    mapped = nullptr;
+    hr = frame.fps_vertices->Map(0u, &no_read, &mapped);
+    if (FAILED(hr) || mapped == nullptr) {
+        error = hr_text(hr, "Map(DX12 fps vertices)");
+        return false;
+    }
+    frame.fps_vertices_mapped = static_cast<std::byte *>(mapped);
+    frame.fps_srv = allocate_texture_srv(s);
+    if (frame.fps_srv == 0u) {
+        error = "DX12 fps overlay ran out of shader resource views";
+        return false;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = kColorFormat;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1u;
+    s.device->CreateShaderResourceView(frame.fps_texture.Get(), &srv, srv_cpu(s, frame.fps_srv));
+    return true;
+}
+
+void composite_fps_overlay(Dx12GeState &s) noexcept {
+    if (!s.settings_pipeline) return;
+    Dx12FrameResources &frame = s.frames[s.frame_cursor];
+    std::string error;
+    if (!ensure_fps_frame(s, frame, error)) {
+        runtime_log_error("dx12 fps overlay", error);
+        return;
+    }
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kFpsOverlayWidth) * kFpsOverlayHeight * 4u);
+    rasterize_fps_overlay(pixels.data(), kFpsOverlayWidth, kFpsOverlayHeight);
+    const UINT row_pitch = (kFpsOverlayWidth * 4u + 255u) & ~255u;
+    auto *destination = reinterpret_cast<std::uint8_t *>(frame.fps_upload_mapped);
+    for (std::uint32_t y = 0u; y < kFpsOverlayHeight; ++y) {
+        std::memcpy(destination + static_cast<std::size_t>(y) * row_pitch,
+                    pixels.data() + static_cast<std::size_t>(y) * kFpsOverlayWidth * 4u,
+                    kFpsOverlayWidth * 4u);
+    }
+    transition(s.list.Get(), frame.fps_texture.Get(), frame.fps_texture_state,
+               D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = frame.fps_upload.Get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    source.PlacedFootprint.Footprint.Format = kColorFormat;
+    source.PlacedFootprint.Footprint.Width = kFpsOverlayWidth;
+    source.PlacedFootprint.Footprint.Height = kFpsOverlayHeight;
+    source.PlacedFootprint.Footprint.Depth = 1u;
+    source.PlacedFootprint.Footprint.RowPitch = row_pitch;
+    D3D12_TEXTURE_COPY_LOCATION destination_location{};
+    destination_location.pResource = frame.fps_texture.Get();
+    destination_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    s.list->CopyTextureRegion(&destination_location, 0u, 0u, 0u, &source, nullptr);
+    transition(s.list.Get(), frame.fps_texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    frame.fps_texture_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    const float swap_w = static_cast<float>(std::max<std::uint32_t>(1u, s.swap_width));
+    const float swap_h = static_cast<float>(std::max<std::uint32_t>(1u, s.swap_height));
+    const float panel_h = static_cast<float>(std::max(28, static_cast<int>(s.swap_height / 28u)));
+    const float panel_w = panel_h * (static_cast<float>(kFpsOverlayWidth) /
+                                      static_cast<float>(kFpsOverlayHeight));
+    const float x0 = -1.0f + 32.0f / swap_w;
+    const float x1 = x0 + 2.0f * panel_w / swap_w;
+    const float y1 = 1.0f - 32.0f / swap_h;
+    const float y0 = y1 - 2.0f * panel_h / swap_h;
+    const SettingsVertex vertices[6]{
+        {x0, y1, 0.0f, 0.0f}, {x1, y1, 1.0f, 0.0f}, {x0, y0, 0.0f, 1.0f},
+        {x0, y0, 0.0f, 1.0f}, {x1, y1, 1.0f, 0.0f}, {x1, y0, 1.0f, 1.0f},
+    };
+    std::memcpy(frame.fps_vertices_mapped, vertices, sizeof(vertices));
+    const D3D12_VIEWPORT viewport{0.0f, 0.0f, swap_w, swap_h, 0.0f, 1.0f};
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(s.swap_width), static_cast<LONG>(s.swap_height)};
+    s.list->RSSetViewports(1u, &viewport);
+    s.list->RSSetScissorRects(1u, &scissor);
+    s.list->SetPipelineState(s.settings_pipeline.Get());
+    s.list->SetGraphicsRootDescriptorTable(0u, srv_gpu(s, frame.fps_srv));
+    s.list->SetGraphicsRootDescriptorTable(1u, sampler_gpu(s, 0u));
+    D3D12_VERTEX_BUFFER_VIEW buffer{};
+    buffer.BufferLocation = frame.fps_vertices->GetGPUVirtualAddress();
+    buffer.SizeInBytes = sizeof(vertices);
+    buffer.StrideInBytes = sizeof(SettingsVertex);
+    s.list->IASetVertexBuffers(0u, 1u, &buffer);
+    s.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    s.list->DrawInstanced(6u, 1u, 0u, 0u);
+}
+
 bool record_direct_present(Dx12GeState &s, Dx12FramebufferTarget &source,
-                           std::string &error) noexcept {
+                           const Dx12FramePresentDecision &decision, std::string &error) noexcept {
     if (!ensure_swapchain(s, error)) return false;
     const UINT index = s.swapchain->GetCurrentBackBufferIndex();
     ID3D12Resource *backbuffer = s.backbuffers[index].Get();
@@ -1657,6 +2009,9 @@ bool record_direct_present(Dx12GeState &s, Dx12FramebufferTarget &source,
         3u, static_cast<UINT>(present_constants.size()), present_constants.data(), 0u);
     s.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     s.list->DrawInstanced(3u, 1u, 0u, 0u);
+    host_fps_note_presented_frame();
+    if (decision.composite_fps) composite_fps_overlay(s);
+    if (decision.composite_settings) composite_settings_overlay(s, decision.settings);
     transition(s.list.Get(), backbuffer, D3D12_RESOURCE_STATE_RENDER_TARGET,
                D3D12_RESOURCE_STATE_PRESENT);
     return true;
@@ -2136,11 +2491,33 @@ void destroy_backend(Dx12GeState &s) noexcept {
             frame.upload_buffer->Unmap(0u, nullptr);
         if (frame.texture_upload_buffer && frame.mapped_texture_upload != nullptr)
             frame.texture_upload_buffer->Unmap(0u, nullptr);
+        if (frame.settings_upload && frame.settings_upload_mapped != nullptr)
+            frame.settings_upload->Unmap(0u, nullptr);
+        if (frame.settings_vertices && frame.settings_vertices_mapped != nullptr)
+            frame.settings_vertices->Unmap(0u, nullptr);
+        if (frame.fps_upload && frame.fps_upload_mapped != nullptr)
+            frame.fps_upload->Unmap(0u, nullptr);
+        if (frame.fps_vertices && frame.fps_vertices_mapped != nullptr)
+            frame.fps_vertices->Unmap(0u, nullptr);
         frame.mapped_upload = nullptr;
         frame.mapped_texture_upload = nullptr;
+        frame.settings_upload_mapped = nullptr;
+        frame.settings_vertices_mapped = nullptr;
+        frame.fps_upload_mapped = nullptr;
+        frame.fps_vertices_mapped = nullptr;
         frame.transient_resources.clear();
         frame.texture_upload_buffer.Reset();
         frame.upload_buffer.Reset();
+        frame.settings_upload.Reset();
+        frame.settings_vertices.Reset();
+        frame.settings_texture.Reset();
+        frame.settings_srv = 0u;
+        frame.settings_texture_state = D3D12_RESOURCE_STATE_COPY_DEST;
+        frame.fps_upload.Reset();
+        frame.fps_vertices.Reset();
+        frame.fps_texture.Reset();
+        frame.fps_srv = 0u;
+        frame.fps_texture_state = D3D12_RESOURCE_STATE_COPY_DEST;
         frame.texture_upload_cursor = 0u;
         frame.allocator.Reset();
         frame.fence_value = 0u;
@@ -2151,6 +2528,9 @@ void destroy_backend(Dx12GeState &s) noexcept {
     s.present_pipeline.Reset();
     s.present_pixel_shader.Reset();
     s.present_vertex_shader.Reset();
+    s.settings_pipeline.Reset();
+    s.settings_pixel_shader.Reset();
+    s.settings_vertex_shader.Reset();
     s.pipelines.clear();
     s.textures.clear();
     s.pending_texture_keys.clear();
@@ -2851,6 +3231,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
             runtime_log_error("dx12 ge swapchain", present_error);
     }
 
+
     HRESULT hr = frame.allocator->Reset();
     if (FAILED(hr)) {
         runtime_log_error("dx12 ge", hr_text(hr, "CommandAllocator::Reset"));
@@ -3162,8 +3543,10 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
         }
     }
 
+    const Dx12FramePresentDecision present_decision = decide_dx12_frame_present(direct_possible);
+    direct_possible = present_decision.present_directly;
     const bool readback_now = s.readback_enabled && s.readback_buffer && display_ready &&
-                              !direct_possible;
+                              present_decision.map_full_frame_readback;
     if (readback_now) {
         transition(s.list.Get(), display_target->color.Get(), display_target->color_state,
                    D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -3184,7 +3567,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     bool recorded_present = false;
     if (direct_possible && display_ready) {
         std::string present_error;
-        recorded_present = record_direct_present(s, *display_target, present_error);
+        recorded_present = record_direct_present(s, *display_target, present_decision, present_error);
         if (!recorded_present && !present_error.empty())
             runtime_log_error("dx12 ge direct present", present_error);
     }

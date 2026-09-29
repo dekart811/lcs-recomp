@@ -21,6 +21,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <SDL.h>
 #endif
 
 namespace lcs {
@@ -136,12 +138,19 @@ void apply_display_key(LcsConfiguration &config, const std::string &key,
         const std::string mode = lowercase_copy(trim_copy(value));
         if (mode == "psp" || mode == "pspnative" || mode == "nativepsp" || mode == "480x272")
             config.display.resolution_mode = DisplayResolutionMode::PspNative;
+        else if (mode == "scale" || mode == "scaled")
+            config.display.resolution_mode = DisplayResolutionMode::Scale;
         else if (mode == "custom")
             config.display.resolution_mode = DisplayResolutionMode::Custom;
         else if (mode == "desktop" || mode == "native" || mode == "monitor")
             config.display.resolution_mode = DisplayResolutionMode::Desktop;
         else
-            warning(config, line, "Display.ResolutionMode expects PSP, Custom or Desktop");
+            warning(config, line, "Display.ResolutionMode expects PSP, Scale, Custom or Desktop");
+        return;
+    }
+    if (key == "scale") {
+        if (!parse_u32(value, 1u, 8u, config.display.scale))
+            warning(config, line, "Display.Scale must be between 1 and 8");
         return;
     }
     if (key == "width") {
@@ -285,6 +294,16 @@ void apply_rendering_key(LcsConfiguration &config, const std::string &key,
     if (key == "anisotropicfiltering" || key == "anisotropy") {
         if (!parse_u32(value, 1u, 16u, config.rendering.anisotropic_filtering))
             warning(config, line, "Rendering.AnisotropicFiltering must be between 1 and 16");
+        return;
+    }
+    if (key == "texturelodbias" || key == "mipbias" || key == "lodbias") {
+        if (!parse_float(value, -8.0f, 8.0f, config.rendering.texture_lod_bias))
+            warning(config, line, "Rendering.TextureLodBias must be between -8 and 8");
+        return;
+    }
+    if (key == "viewdistance" || key == "drawdistance" || key == "loddistance") {
+        if (!parse_float(value, 1.0f, 4.0f, config.rendering.view_distance))
+            warning(config, line, "Rendering.ViewDistance must be between 1 and 4");
         return;
     }
     if (key == "internalwidth") {
@@ -477,6 +496,28 @@ void set_environment_value(const char *name, const std::string &value) {
 #endif
 }
 
+bool query_desktop_pixels(std::uint32_t &width, std::uint32_t &height) noexcept {
+#if defined(_WIN32)
+    const int desktop_width = GetSystemMetrics(SM_CXSCREEN);
+    const int desktop_height = GetSystemMetrics(SM_CYSCREEN);
+    if (desktop_width < 320 || desktop_height < 180) return false;
+    width = static_cast<std::uint32_t>(desktop_width);
+    height = static_cast<std::uint32_t>(desktop_height);
+    return true;
+#else
+    if (SDL_WasInit(SDL_INIT_VIDEO) == 0u && SDL_InitSubSystem(SDL_INIT_VIDEO) != 0)
+        return false;
+    SDL_DisplayMode mode{};
+    if (SDL_GetDesktopDisplayMode(0, &mode) != 0 || mode.w < 320 || mode.h < 180) {
+        if (SDL_GetCurrentDisplayMode(0, &mode) != 0 || mode.w < 320 || mode.h < 180)
+            return false;
+    }
+    width = static_cast<std::uint32_t>(mode.w);
+    height = static_cast<std::uint32_t>(mode.h);
+    return true;
+#endif
+}
+
 }
 
 DisplaySurfaceDimensions resolve_display_surface_dimensions(
@@ -484,19 +525,75 @@ DisplaySurfaceDimensions resolve_display_surface_dimensions(
     switch (configuration.resolution_mode) {
     case DisplayResolutionMode::PspNative:
         return {480u, 272u};
+    case DisplayResolutionMode::Scale: {
+        const std::uint32_t scale = std::clamp(configuration.scale, 1u, 8u);
+        return {480u * scale, 272u * scale};
+    }
     case DisplayResolutionMode::Custom:
         return {std::clamp(configuration.custom_width, 320u, 16384u),
                 std::clamp(configuration.custom_height, 180u, 16384u)};
-    case DisplayResolutionMode::Desktop:
-#if defined(_WIN32)
-        return {static_cast<std::uint32_t>(std::max(320, GetSystemMetrics(SM_CXSCREEN))),
-                static_cast<std::uint32_t>(std::max(180, GetSystemMetrics(SM_CYSCREEN)))};
-#else
+    case DisplayResolutionMode::Desktop: {
+        std::uint32_t width = 0u;
+        std::uint32_t height = 0u;
+        if (query_desktop_pixels(width, height))
+            return {std::clamp(width, 320u, 16384u), std::clamp(height, 180u, 16384u)};
         return {std::clamp(configuration.custom_width, 320u, 16384u),
                 std::clamp(configuration.custom_height, 180u, 16384u)};
-#endif
+    }
     }
     return {480u, 272u};
+}
+
+DisplaySurfaceDimensions resolve_window_dimensions() noexcept {
+    if (const char *text = std::getenv("LCS_WINDOW_SCALE")) {
+        const int parsed = std::atoi(text);
+        if (parsed >= 1 && parsed <= 8)
+            return {480u * static_cast<std::uint32_t>(parsed),
+                    272u * static_cast<std::uint32_t>(parsed)};
+    }
+    return resolve_display_surface_dimensions(lcs_render_configuration().display);
+}
+
+float rendering_texture_lod_bias() noexcept {
+    const float bias = lcs_render_configuration().rendering.texture_lod_bias;
+    if (!std::isfinite(bias)) return 0.0f;
+    return std::clamp(bias, -8.0f, 8.0f);
+}
+
+float view_distance_scale() noexcept {
+    const float scale = lcs_render_configuration().rendering.view_distance;
+    if (!std::isfinite(scale)) return 1.0f;
+    return std::clamp(scale, 1.0f, 4.0f);
+}
+
+void lcs_set_view_distance(float value) noexcept {
+    if (!std::isfinite(value)) return;
+    value = std::clamp(value, 1.0f, 4.0f);
+    std::lock_guard<std::mutex> guard(global_configuration_mutex());
+    global_configuration().rendering.view_distance = value;
+}
+
+void lcs_set_fullscreen_setting(bool enabled) noexcept {
+    std::lock_guard<std::mutex> guard(global_configuration_mutex());
+    global_configuration().display.fullscreen = enabled;
+}
+
+void lcs_set_show_fps(bool enabled) noexcept {
+    std::lock_guard<std::mutex> guard(global_configuration_mutex());
+    global_configuration().display.show_fps = enabled;
+}
+
+void lcs_set_frame_rate(std::uint32_t frame_rate) noexcept {
+    frame_rate = frame_rate <= 30u ? 30u : 60u;
+    std::lock_guard<std::mutex> guard(global_configuration_mutex());
+    global_configuration().timing.frame_rate = frame_rate;
+}
+
+void lcs_set_internal_resolution(InternalResolutionMode mode, std::uint32_t scale) noexcept {
+    scale = std::clamp(scale, 1u, 8u);
+    std::lock_guard<std::mutex> guard(global_configuration_mutex());
+    global_configuration().rendering.internal_resolution_mode = mode;
+    global_configuration().rendering.internal_scale = scale;
 }
 
 PresentationRectangle calculate_presentation_rectangle(
@@ -552,14 +649,14 @@ InternalResolutionDimensions resolve_internal_resolution(
     case InternalResolutionMode::Custom:
         return {std::clamp(configuration.internal_width, 480u, 16384u),
                 std::clamp(configuration.internal_height, 272u, 16384u)};
-    case InternalResolutionMode::Desktop:
-#if defined(_WIN32)
-        return {static_cast<std::uint32_t>(std::max(480, GetSystemMetrics(SM_CXSCREEN))),
-                static_cast<std::uint32_t>(std::max(272, GetSystemMetrics(SM_CYSCREEN)))};
-#else
+    case InternalResolutionMode::Desktop: {
+        std::uint32_t width = 0u;
+        std::uint32_t height = 0u;
+        if (query_desktop_pixels(width, height))
+            return {std::clamp(width, 480u, 16384u), std::clamp(height, 272u, 16384u)};
         return {std::clamp(configuration.internal_width, 480u, 16384u),
                 std::clamp(configuration.internal_height, 272u, 16384u)};
-#endif
+    }
     }
     return {480u, 272u};
 }
@@ -693,6 +790,7 @@ const LcsConfiguration &lcs_render_configuration() {
 const char *display_resolution_mode_name(DisplayResolutionMode mode) noexcept {
     switch (mode) {
     case DisplayResolutionMode::PspNative: return "PSP";
+    case DisplayResolutionMode::Scale: return "Scale";
     case DisplayResolutionMode::Custom: return "Custom";
     case DisplayResolutionMode::Desktop: return "Desktop";
     }

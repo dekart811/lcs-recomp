@@ -9,6 +9,7 @@ namespace lcs {
 
 enum class DisplayResolutionMode : std::uint8_t {
     PspNative,
+    Scale,
     Custom,
     Desktop,
 };
@@ -39,6 +40,7 @@ enum class RenderingBackend : std::uint8_t {
 struct DisplayConfiguration {
     bool enabled{true};
     DisplayResolutionMode resolution_mode{DisplayResolutionMode::PspNative};
+    std::uint32_t scale{2u};
     std::uint32_t custom_width{480u};
     std::uint32_t custom_height{272u};
     bool fullscreen{false};
@@ -65,6 +67,20 @@ struct DisplaySurfaceDimensions {
 [[nodiscard]] DisplaySurfaceDimensions resolve_display_surface_dimensions(
     const DisplayConfiguration &configuration) noexcept;
 
+// Window client size. LCS_WINDOW_SCALE, when set to 1..8, replaces the ini size.
+[[nodiscard]] DisplaySurfaceDimensions resolve_window_dimensions() noexcept;
+
+// Extra mip bias from Rendering.TextureLodBias, clamped to -8..8.
+[[nodiscard]] float rendering_texture_lod_bias() noexcept;
+
+[[nodiscard]] float view_distance_scale() noexcept;
+
+void lcs_set_view_distance(float value) noexcept;
+void lcs_set_fullscreen_setting(bool enabled) noexcept;
+void lcs_set_show_fps(bool enabled) noexcept;
+void lcs_set_frame_rate(std::uint32_t frame_rate) noexcept;
+void lcs_set_internal_resolution(InternalResolutionMode mode, std::uint32_t scale) noexcept;
+
 [[nodiscard]] PresentationRectangle calculate_presentation_rectangle(
     std::uint32_t client_width, std::uint32_t client_height,
     std::uint32_t source_width, std::uint32_t source_height,
@@ -82,6 +98,9 @@ struct RenderingConfiguration {
     std::uint32_t internal_width{960u};
     std::uint32_t internal_height{544u};
     std::uint32_t anisotropic_filtering{1u};
+    float texture_lod_bias{0.0f};
+    // LOD distance (TheCamera+224), far clip (RwCamera+132), fog plane (RwCamera+136).
+    float view_distance{1.0f};
     std::uint32_t msaa{4u};
     std::uint32_t depth_precision{24u};
     std::uint32_t texture_cache_entries{8192u};
