@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
+#include "lcs_lang.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -7488,7 +7489,7 @@ L_08AE3614:
     ctx.fpr[12] = std::bit_cast<float>(ctx.gpr[19]);
     ctx.fpr[12] = static_cast<float>(static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(ctx.fpr[12])));
     ctx.gpr[17] = (ctx.gpr[17] + static_cast<std::uint32_t>(1));
-    ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[17]) < 4 ? 1u : 0u);
+    ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[17]) < lcs::kTabEntrySpanish ? 1u : 0u);
     ctx.fpr[12] = ctx.fpr[12] + ctx.fpr[0];
     ctx.fpr[12] = std::bit_cast<float>(ctx.fpu_float_to_word_ct<1u>(ctx.fpr[12]));
     { const bool branch_taken = ctx.gpr[4] != 0u;
@@ -7501,7 +7502,7 @@ L_08AE3614:
 L_08AE3634:
     ctx.gpr[18] = (0u | 249u);
     ctx.gpr[19] = (0u | 15u);
-    ctx.gpr[17] = (0u | 4u);
+    ctx.gpr[17] = static_cast<std::uint32_t>(lcs::kTabEntrySpanish);
     goto L_08AE3640;
 L_08AE3640:
     ctx.gpr[4] = (ctx.gpr[16] << 3u);
@@ -7521,7 +7522,7 @@ L_08AE366C:
     ctx.fpr[12] = std::bit_cast<float>(ctx.gpr[19]);
     ctx.fpr[12] = static_cast<float>(static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(ctx.fpr[12])));
     ctx.gpr[17] = (ctx.gpr[17] + static_cast<std::uint32_t>(1));
-    ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[17]) < 8 ? 1u : 0u);
+    ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[17]) < lcs::kTabCount ? 1u : 0u);
     ctx.fpr[12] = ctx.fpr[12] + ctx.fpr[0];
     ctx.fpr[12] = std::bit_cast<float>(ctx.fpu_float_to_word_ct<1u>(ctx.fpr[12]));
     { const bool branch_taken = ctx.gpr[4] != 0u;
@@ -7593,7 +7594,7 @@ L_08AE371C:
     ctx.fpr[12] = std::bit_cast<float>(ctx.gpr[17]);
     ctx.fpr[12] = static_cast<float>(static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(ctx.fpr[12])));
     ctx.gpr[19] = (ctx.gpr[19] + static_cast<std::uint32_t>(1));
-    ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[19]) < 8 ? 1u : 0u);
+    ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[19]) < lcs::kTabCount ? 1u : 0u);
     ctx.fpr[12] = ctx.fpr[12] + ctx.fpr[0];
     ctx.fpr[12] = std::bit_cast<float>(ctx.fpu_float_to_word_ct<1u>(ctx.fpr[12]));
     { const bool branch_taken = ctx.gpr[4] != 0u;

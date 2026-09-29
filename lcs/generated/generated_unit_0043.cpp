@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
+#include "lcs_lang.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -5131,6 +5132,7 @@ L_088B2130:
     ctx.gpr[4] = (aot_mem.aot_load32(ctx.gpr[16] + static_cast<std::uint32_t>(12)));
     ctx.gpr[5] = (2230u << 16u);
     aot_mem.aot_store32(ctx.gpr[5] + static_cast<std::uint32_t>(-29520), ctx.gpr[4]);
+    lcs::lcs_restore_lang(rt, aot_mem.aot_load32(ctx.gpr[16] + static_cast<std::uint32_t>(16)));
     ctx.gpr[4] = (aot_mem.aot_load32(ctx.gpr[16] + static_cast<std::uint32_t>(32)));
     ctx.gpr[5] = (2227u << 16u);
     aot_mem.aot_store32(ctx.gpr[5] + static_cast<std::uint32_t>(27328), ctx.gpr[4]);

@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
+#include "lcs_lang.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -3868,6 +3869,10 @@ L_08ADD210:
     }
 L_08ADD224:
     ctx.gpr[4] = (aot_mem.aot_load32(ctx.gpr[16] + static_cast<std::uint32_t>(0)));
+    if (ctx.gpr[4] == lcs::kLangTab) {
+        aot_mem.aot_store32(ctx.gpr[16] + static_cast<std::uint32_t>(1380), lcs::kLangPage);
+        goto L_08ADD330;
+    }
     ctx.gpr[5] = (ctx.gpr[4] + static_cast<std::uint32_t>(-1));
     ctx.gpr[5] = (ctx.gpr[5] < static_cast<std::uint32_t>(8) ? 1u : 0u);
     { const bool branch_taken = ctx.gpr[5] == 0u;
@@ -3961,6 +3966,10 @@ L_08ADD2A0:
     }
 L_08ADD2AC:
     ctx.gpr[4] = (aot_mem.aot_load32(ctx.gpr[16] + static_cast<std::uint32_t>(0)));
+    if (ctx.gpr[4] == lcs::kLangTab) {
+        aot_mem.aot_store32(ctx.gpr[16] + static_cast<std::uint32_t>(1380), lcs::kLangPage);
+        goto L_08ADD330;
+    }
     ctx.gpr[5] = (ctx.gpr[4] + static_cast<std::uint32_t>(-1));
     ctx.gpr[5] = (ctx.gpr[5] < static_cast<std::uint32_t>(8) ? 1u : 0u);
     { const bool branch_taken = ctx.gpr[5] == 0u;
@@ -7802,6 +7811,10 @@ L_08ADEFF4:
       goto L_08ADF008;
     }
 L_08ADF008:
+    if (ctx.gpr[4] == lcs::kLangTab) {
+        aot_mem.aot_store32(ctx.gpr[16] + static_cast<std::uint32_t>(1380), lcs::kLangPage);
+        goto L_08ADF168;
+    }
     ctx.gpr[4] = (ctx.gpr[4] + static_cast<std::uint32_t>(-1));
     ctx.gpr[6] = (ctx.gpr[4] < static_cast<std::uint32_t>(8) ? 1u : 0u);
     { const bool branch_taken = ctx.gpr[6] == 0u;
@@ -7893,6 +7906,10 @@ L_08ADF07C:
       goto L_08ADF088;
     }
 L_08ADF088:
+    if (ctx.gpr[4] == lcs::kLangTab) {
+        aot_mem.aot_store32(ctx.gpr[16] + static_cast<std::uint32_t>(1380), lcs::kLangPage);
+        goto L_08ADF168;
+    }
     ctx.gpr[4] = (ctx.gpr[4] + static_cast<std::uint32_t>(-1));
     ctx.gpr[6] = (ctx.gpr[4] < static_cast<std::uint32_t>(8) ? 1u : 0u);
     { const bool branch_taken = ctx.gpr[6] == 0u;

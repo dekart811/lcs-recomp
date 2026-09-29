@@ -9,6 +9,7 @@
 #include "lcs_audio_output.hpp"
 #include "lcs_fps_overlay.hpp"
 #include "lcs_frame_limit.hpp"
+#include "lcs_lang.hpp"
 
 #include "psprecomp/common.hpp"
 
@@ -2409,6 +2410,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
     async_return_frames.clear();
     virtual_time_us = 0u;
     g_vblank_interrupt_due_us = 0u;
+    lcs_install_lang(runtime);
 
     if (std::getenv("LCS_PC_PROFILE") != nullptr) {
         psprecomp::set_runtime_pre_chained_call_hook(&lcs_pc_profile_hook);
