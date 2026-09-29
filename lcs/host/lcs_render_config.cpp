@@ -432,10 +432,8 @@ void apply_timing_key(LcsConfiguration &config, const std::string &key,
                       const std::string &value, std::size_t line) {
     if (key == "framerate" || key == "fps" || key == "targetfps") {
         std::uint32_t frame_rate = 0u;
-        if (!parse_u32(value, 30u, 240u, frame_rate) ||
-            (frame_rate != 30u && frame_rate != 60u && frame_rate != 120u &&
-             frame_rate != 200u && frame_rate != 240u)) {
-            warning(config, line, "Timing.FrameRate expects 30, 60, 120, 200 or 240");
+        if (!parse_u32(value, 30u, 60u, frame_rate) || (frame_rate != 30u && frame_rate != 60u)) {
+            warning(config, line, "Timing.FrameRate expects 30 or 60");
             return;
         }
         config.timing.frame_rate = frame_rate;

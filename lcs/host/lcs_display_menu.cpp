@@ -228,8 +228,7 @@ void change_selected(int direction) noexcept {
     } else if (g_selected == 3) {
         lcs_set_show_fps(!lcs_render_configuration().display.show_fps);
     } else {
-        const std::uint32_t current = lcs_render_configuration().timing.frame_rate <= 30u ? 30u : 60u;
-        const int index = current == 30u ? 0 : 1;
+        const int index = lcs_render_configuration().timing.frame_rate == 30u ? 0 : 1;
         lcs_set_frame_rate(kFrameRates[step_index(index, static_cast<int>(std::size(kFrameRates)), direction)]);
     }
     save_settings();
@@ -411,8 +410,8 @@ HostSettingsView host_settings_view() noexcept {
                   view.resolution_pending ? " *" : "");
     std::snprintf(view.rows[3], sizeof(view.rows[3]), "FPS counter     %s",
                   lcs_render_configuration().display.show_fps ? "On" : "Off");
-    const std::uint32_t frame_rate = lcs_render_configuration().timing.frame_rate <= 30u ? 30u : 60u;
-    std::snprintf(view.rows[4], sizeof(view.rows[4]), "Frame rate      %u", frame_rate);
+    std::snprintf(view.rows[4], sizeof(view.rows[4]), "Frame rate      %u",
+                  lcs_render_configuration().timing.frame_rate);
     return view;
 }
 
