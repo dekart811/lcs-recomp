@@ -46,6 +46,23 @@ backend name keeps the software rasterizer. `LCS_VULKAN_VALIDATION=1`
 turns on the Khronos validation layer and prints its warnings and
 errors.
 
+## Docker
+You also can utilize [Docker](https://www.docker.com/) to build the Linux version.
+
+```bash
+cd docker
+./build.sh
+
+Available options:
+
+        archlinux       compile the source code on Arch Linux
+        debian          compile the source code on Debian
+
+Usage: ./build.sh <option>
+```
+
+That way you will get a pre-confugred build environment which also utilzes [ccache](https://ccache.dev/) for faster building times.
+
 ## License
 
 MIT, see [`LICENSE`](LICENSE). Third-party notices: [`lcs/THIRD_PARTY.md`](lcs/THIRD_PARTY.md).
