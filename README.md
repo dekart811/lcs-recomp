@@ -30,6 +30,62 @@ target, with the same four choices. `Desktop` uses the monitor on
 Windows and on Linux. `Rendering.TextureLodBias` shifts texture mip
 selection; negative values keep textures sharper at a distance.
 
+## Mouse and keyboard
+
+Edit `[Controls]` in `lcs/config/LCSNative.ini`, then restart. A
+binding is one or more names separated by commas. `None` clears it.
+`Shift`, `Ctrl`, and `Alt` set both sides. The accepted names are
+commented in that file. F10 opens host settings. F11 toggles
+fullscreen. Moving the mouse looks around. A controller button
+takes the same action names.
+
+| Binding | Default | Action |
+| --- | --- | --- |
+| `MoveForward` | W | On foot, move forward. In a vehicle, accelerate. |
+| `MoveBack` | S | On foot, move back. In a vehicle, brake. |
+| `MoveLeft` | A | Move or steer left. |
+| `MoveRight` | D | Move or steer right. |
+| `Walk` | Left Alt | Shorter steps. |
+| `Sprint` | Space | Run on foot. Not sent in a vehicle. |
+| `Jump` | Left Shift, Right Shift | Jump. In a vehicle the game reads this as the brake. |
+| `Attack` | Left mouse button | Attack or fire. |
+| `Aim` | Right mouse button | Aim on foot. Not sent in a vehicle. |
+| `CenterCamera` | H, middle mouse button | Put the camera behind you. Also picks up a weapon. |
+| `EnterVehicle` | F, Enter | Enter or exit a vehicle. |
+| `WeaponPrevious` | Q, Left, wheel up | Previous weapon. In a vehicle, previous radio station. |
+| `WeaponNext` | E, Right, wheel down | Next weapon. In a vehicle, next radio station. |
+| `Up` | Up | Toggle a special mission. In a vehicle, also pitches up. |
+| `Down` | Down | D-pad down. In a vehicle, horn and pitch down. |
+| `Pause` | Escape | Pause. |
+| `Camera` | V | Change camera. |
+| `Handbrake` | Space | Handbrake in a vehicle. |
+
+Controller names follow the Xbox layout. On a PlayStation pad, A is
+Cross, B is Circle, X is Square, and Y is Triangle. `LeftStick` and
+`RightStick` are `Move` or `Camera`. A trigger does not send its
+buttons in a vehicle; accelerate and brake still apply.
+
+| Button | Default | Action |
+| --- | --- | --- |
+| A / Cross | `Sprint` | Run. Also sent in a vehicle. |
+| B / Circle | `Attack` | Attack or fire. |
+| X / Square | `Jump` | In a vehicle the game reads this as the brake. |
+| Y / Triangle | `EnterVehicle` | Enter or exit a vehicle. |
+| LB / L1 | `CenterCamera` | Puts the camera behind you. Also picks up a weapon. |
+| RB / R1 | `Aim` | Aim. In a vehicle, the handbrake. |
+| LT / L2 | `MoveBack`, `CenterCamera` | Brake. On foot, also centers the camera. |
+| RT / R2 | `MoveForward`, `Aim` | Accelerate. On foot, also aims. |
+| D-pad left | `WeaponPrevious` | Previous weapon. In a vehicle, the previous radio station. |
+| D-pad right | `WeaponNext` | Next weapon. In a vehicle, the next radio station. |
+| D-pad up | `Up` | Special mission. |
+| D-pad down | `Down` | Horn in a vehicle. |
+| Start | `Pause` | Pause. |
+| Back / Share | `Camera` | Change camera. |
+| Left stick | `Move` | Movement. `LeftStick` swaps this with the camera. |
+| Right stick | `Camera` | Camera. |
+| Left stick click | `Down` | Horn in a vehicle. |
+| Right stick click | `None` | `PadRightStickClick`. |
+
 ## Linux
 
 The native build uses Vulkan for the GE and SDL2 for the window and

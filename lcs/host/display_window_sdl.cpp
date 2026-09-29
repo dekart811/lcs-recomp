@@ -7,6 +7,7 @@
 #include "lcs_menu.hpp"
 #include "lcs_mouse.hpp"
 #include "lcs_display_menu.hpp"
+#include "lcs_key_bindings.hpp"
 #include "lcs_render_config.hpp"
 #include "host_font_5x7.hpp"
 
@@ -49,54 +50,59 @@ void discard_pending_pointer() noexcept {
     g_mouse_dy.store(0, std::memory_order_relaxed);
 }
 
-constexpr std::uint32_t kPspSelect = 0x000001u;
-constexpr std::uint32_t kPspStart = 0x000008u;
-constexpr std::uint32_t kPspUp = 0x000010u;
-constexpr std::uint32_t kPspRight = 0x000020u;
-constexpr std::uint32_t kPspDown = 0x000040u;
-constexpr std::uint32_t kPspLeft = 0x000080u;
-constexpr std::uint32_t kPspLTrigger = 0x000100u;
-constexpr std::uint32_t kPspRTrigger = 0x000200u;
-constexpr std::uint32_t kPspTriangle = 0x001000u;
-constexpr std::uint32_t kPspCircle = 0x002000u;
-constexpr std::uint32_t kPspCross = 0x004000u;
-constexpr std::uint32_t kPspSquare = 0x008000u;
+constexpr int sdl_scancode(HostKey key) noexcept {
+    const int id = static_cast<int>(key);
+    if (host_key_in(key, HostKey::A, HostKey::Z))
+        return SDL_SCANCODE_A + (id - static_cast<int>(HostKey::A));
+    if (key == HostKey::Digit0)
+        return SDL_SCANCODE_0;
+    if (host_key_in(key, HostKey::Digit1, HostKey::Digit9))
+        return SDL_SCANCODE_1 + (id - static_cast<int>(HostKey::Digit1));
+    if (host_key_in(key, HostKey::F1, HostKey::F12))
+        return SDL_SCANCODE_F1 + (id - static_cast<int>(HostKey::F1));
+    if (host_key_in(key, HostKey::Numpad0, HostKey::Numpad9)) {
+        const int number = id - static_cast<int>(HostKey::Numpad0);
+        return number == 0 ? SDL_SCANCODE_KP_0 : SDL_SCANCODE_KP_1 + (number - 1);
+    }
+    switch (key) {
+    case HostKey::Space: return SDL_SCANCODE_SPACE;
+    case HostKey::Enter: return SDL_SCANCODE_RETURN;
+    case HostKey::Escape: return SDL_SCANCODE_ESCAPE;
+    case HostKey::Tab: return SDL_SCANCODE_TAB;
+    case HostKey::Backspace: return SDL_SCANCODE_BACKSPACE;
+    case HostKey::LeftShift: return SDL_SCANCODE_LSHIFT;
+    case HostKey::RightShift: return SDL_SCANCODE_RSHIFT;
+    case HostKey::LeftCtrl: return SDL_SCANCODE_LCTRL;
+    case HostKey::RightCtrl: return SDL_SCANCODE_RCTRL;
+    case HostKey::LeftAlt: return SDL_SCANCODE_LALT;
+    case HostKey::RightAlt: return SDL_SCANCODE_RALT;
+    case HostKey::Up: return SDL_SCANCODE_UP;
+    case HostKey::Down: return SDL_SCANCODE_DOWN;
+    case HostKey::Left: return SDL_SCANCODE_LEFT;
+    case HostKey::Right: return SDL_SCANCODE_RIGHT;
+    case HostKey::NumpadPlus: return SDL_SCANCODE_KP_PLUS;
+    case HostKey::NumpadMinus: return SDL_SCANCODE_KP_MINUS;
+    case HostKey::Delete: return SDL_SCANCODE_DELETE;
+    case HostKey::Insert: return SDL_SCANCODE_INSERT;
+    case HostKey::Home: return SDL_SCANCODE_HOME;
+    case HostKey::End: return SDL_SCANCODE_END;
+    case HostKey::PageUp: return SDL_SCANCODE_PAGEUP;
+    case HostKey::PageDown: return SDL_SCANCODE_PAGEDOWN;
+    case HostKey::Comma: return SDL_SCANCODE_COMMA;
+    case HostKey::Period: return SDL_SCANCODE_PERIOD;
+    case HostKey::Minus: return SDL_SCANCODE_MINUS;
+    case HostKey::Equals: return SDL_SCANCODE_EQUALS;
+    default: return -1;
+    }
+}
 
-struct KeyBinding {
-    SDL_Scancode scancode;
-    std::uint32_t psp_button;
-};
-
-constexpr KeyBinding kKeyBindings[] = {
-    {SDL_SCANCODE_SPACE, kPspCross},
-    {SDL_SCANCODE_LSHIFT, kPspSquare},
-    {SDL_SCANCODE_RSHIFT, kPspSquare},
-    {SDL_SCANCODE_F, kPspTriangle},
-    {SDL_SCANCODE_RETURN, kPspTriangle},
-    {SDL_SCANCODE_Q, kPspLeft},
-    {SDL_SCANCODE_E, kPspRight},
-    {SDL_SCANCODE_H, kPspLTrigger},
-    {SDL_SCANCODE_UP, kPspUp},
-    {SDL_SCANCODE_DOWN, kPspDown},
-    {SDL_SCANCODE_LEFT, kPspLeft},
-    {SDL_SCANCODE_RIGHT, kPspRight},
-    {SDL_SCANCODE_ESCAPE, kPspStart},
-    {SDL_SCANCODE_V, kPspSelect},
-};
+static_assert(sdl_scancode(HostKey::Digit0) == SDL_SCANCODE_0);
+static_assert(sdl_scancode(HostKey::Digit1) == SDL_SCANCODE_1);
+static_assert(sdl_scancode(HostKey::Digit9) == SDL_SCANCODE_9);
 
 bool key_down(SDL_Scancode scancode) noexcept {
     const std::uint8_t *keys = SDL_GetKeyboardState(nullptr);
     return keys != nullptr && keys[scancode] != 0;
-}
-
-std::uint8_t stick_to_psp(std::int16_t value, bool invert) noexcept {
-    constexpr int kDeadZone = 7849;
-    int magnitude = std::abs(static_cast<int>(value));
-    if (magnitude <= kDeadZone) return 128u;
-    magnitude = (magnitude - kDeadZone) * 32767 / (32767 - kDeadZone);
-    int signed_value = value < 0 ? -magnitude : magnitude;
-    if (invert) signed_value = -signed_value;
-    return static_cast<std::uint8_t>(std::clamp(128 + signed_value * 127 / 32767, 0, 255));
 }
 
 void close_pad() noexcept {
@@ -536,32 +542,30 @@ HostInputState display_window_input() {
     const bool driving = lcs_player_in_vehicle();
     const ControlsConfiguration &controls = lcs_render_configuration().controls;
     if (focused) {
-        for (const KeyBinding &binding : kKeyBindings)
-            if (key_down(binding.scancode)) input.buttons |= binding.psp_button;
         const std::uint32_t mouse = SDL_GetMouseState(nullptr, nullptr);
-        if ((mouse & SDL_BUTTON_LMASK) != 0) input.buttons |= kPspCircle;
-        if ((mouse & SDL_BUTTON_RMASK) != 0) input.buttons |= kPspRTrigger;
-        if ((mouse & SDL_BUTTON_MMASK) != 0) input.buttons |= kPspLTrigger;
-        if (driving) {
-            input.buttons &= ~(kPspCross | kPspRTrigger);
-            if (key_down(SDL_SCANCODE_SPACE)) input.buttons |= kPspRTrigger;
-        }
-        int move_x = 0;
-        int move_y = 0;
-        if (key_down(SDL_SCANCODE_A)) move_x -= 1;
-        if (key_down(SDL_SCANCODE_D)) move_x += 1;
-        if (!driving) {
-            if (key_down(SDL_SCANCODE_W)) move_y -= 1;
-            if (key_down(SDL_SCANCODE_S)) move_y += 1;
-        } else {
-            if (key_down(SDL_SCANCODE_UP)) move_y -= 1;
-            if (key_down(SDL_SCANCODE_DOWN)) move_y += 1;
-        }
-        input.accelerate = key_down(SDL_SCANCODE_W);
-        input.brake = key_down(SDL_SCANCODE_S);
-        const int reach = key_down(SDL_SCANCODE_LALT) ? 60 : 127;
-        input.analog_x = static_cast<std::uint8_t>(std::clamp(128 + move_x * reach, 0, 255));
-        input.analog_y = static_cast<std::uint8_t>(std::clamp(128 + move_y * reach, 0, 255));
+        const auto mouse_held = [mouse](std::uint32_t mask) {
+            return (mouse & mask) != 0;
+        };
+        const auto is_down = [&](HostKey key) {
+            const int code = sdl_scancode(key);
+            if (code >= 0) return key_down(static_cast<SDL_Scancode>(code));
+            switch (key) {
+            case HostKey::MouseLeft: return mouse_held(SDL_BUTTON_LMASK);
+            case HostKey::MouseRight: return mouse_held(SDL_BUTTON_RMASK);
+            case HostKey::MouseMiddle: return mouse_held(SDL_BUTTON_MMASK);
+            case HostKey::Mouse4: return mouse_held(SDL_BUTTON_X1MASK);
+            case HostKey::Mouse5: return mouse_held(SDL_BUTTON_X2MASK);
+            default: return false;
+            }
+        };
+        const KeyboardSample keys = sample_keyboard(controls.bindings, driving, is_down);
+        input.buttons |= keys.buttons;
+        input.accelerate = keys.accelerate;
+        input.brake = keys.brake;
+        input.analog_x = static_cast<std::uint8_t>(
+            std::clamp(128 + keys.move_x * keys.reach, 0, 255));
+        input.analog_y = static_cast<std::uint8_t>(
+            std::clamp(128 + keys.move_y * keys.reach, 0, 255));
         const int sensitivity = static_cast<int>(controls.mouse_sensitivity);
         const auto camera_response = [sensitivity](std::int32_t delta) {
             const double scaled = std::abs(delta) * (sensitivity / 12.0);
@@ -581,7 +585,7 @@ HostInputState display_window_input() {
             wheel_button = wheel > 0 ? kPspSquare : kPspCross;
             wheel_hold = 8;
         } else {
-            wheel_button = wheel > 0 ? kPspLeft : kPspRight;
+            wheel_button = binding_wheel_buttons(controls.bindings, wheel > 0, driving);
             wheel_hold = 4;
         }
     }
@@ -591,45 +595,54 @@ HostInputState display_window_input() {
     }
     if (!focused || g_pad == nullptr) return publish();
 
-    auto held = [&](SDL_GameControllerButton button) {
-        return SDL_GameControllerGetButton(g_pad, button) != 0;
+    const auto pad_down = [&](PadButton button) {
+        const auto held = [&](SDL_GameControllerButton id) {
+            return SDL_GameControllerGetButton(g_pad, id) != 0;
+        };
+        const auto axis = [&](SDL_GameControllerAxis id) {
+            return SDL_GameControllerGetAxis(g_pad, id);
+        };
+        switch (button) {
+        case PadButton::A: return held(SDL_CONTROLLER_BUTTON_A);
+        case PadButton::B: return held(SDL_CONTROLLER_BUTTON_B);
+        case PadButton::X: return held(SDL_CONTROLLER_BUTTON_X);
+        case PadButton::Y: return held(SDL_CONTROLLER_BUTTON_Y);
+        case PadButton::LeftShoulder: return held(SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+        case PadButton::RightShoulder: return held(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+        case PadButton::Start: return held(SDL_CONTROLLER_BUTTON_START);
+        case PadButton::Back: return held(SDL_CONTROLLER_BUTTON_BACK);
+        case PadButton::DpadUp: return held(SDL_CONTROLLER_BUTTON_DPAD_UP);
+        case PadButton::DpadDown: return held(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+        case PadButton::DpadLeft: return held(SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+        case PadButton::DpadRight: return held(SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+        case PadButton::LeftClick: return held(SDL_CONTROLLER_BUTTON_LEFTSTICK);
+        case PadButton::RightClick: return held(SDL_CONTROLLER_BUTTON_RIGHTSTICK);
+        case PadButton::LeftTrigger: return axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8192;
+        case PadButton::RightTrigger: return axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8192;
+        case PadButton::Count: return false;
+        }
+        return false;
     };
-    if (held(SDL_CONTROLLER_BUTTON_A)) input.buttons |= kPspCross;
-    if (held(SDL_CONTROLLER_BUTTON_X)) input.buttons |= kPspSquare;
-    if (held(SDL_CONTROLLER_BUTTON_Y)) input.buttons |= kPspTriangle;
-    if (held(SDL_CONTROLLER_BUTTON_B)) input.buttons |= kPspCircle;
-    if (held(SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) input.buttons |= kPspLTrigger;
-    if (held(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) input.buttons |= kPspRTrigger;
-    if (held(SDL_CONTROLLER_BUTTON_START)) input.buttons |= kPspStart;
-    if (held(SDL_CONTROLLER_BUTTON_BACK)) input.buttons |= kPspSelect;
-    if (held(SDL_CONTROLLER_BUTTON_DPAD_UP)) input.buttons |= kPspUp;
-    if (held(SDL_CONTROLLER_BUTTON_DPAD_DOWN)) input.buttons |= kPspDown;
-    if (held(SDL_CONTROLLER_BUTTON_DPAD_LEFT)) input.buttons |= kPspLeft;
-    if (held(SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) input.buttons |= kPspRight;
-    const auto axis = [&](SDL_GameControllerAxis id) {
-        return SDL_GameControllerGetAxis(g_pad, id);
+    const PadSample pad = sample_pad(controls.bindings, driving, pad_down);
+    input.buttons |= pad.buttons;
+    if (pad.accelerate) input.accelerate = true;
+    if (pad.brake) input.brake = true;
+    const auto apply_stick = [&](SDL_GameControllerAxis x_axis, SDL_GameControllerAxis y_axis,
+                                 StickRole role) {
+        const StickReading reading = interpret_stick(
+            role, SDL_GameControllerGetAxis(g_pad, x_axis), SDL_GameControllerGetAxis(g_pad, y_axis),
+            false, controls.invert_camera_y);
+        if (reading.move) {
+            input.analog_x = reading.move_x;
+            input.analog_y = reading.move_y;
+        }
+        if (reading.camera) {
+            input.camera_x = reading.camera_x;
+            input.camera_y = reading.camera_y;
+        }
     };
-    const std::int16_t left_trigger = axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT);
-    const std::int16_t right_trigger = axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
-    if (!driving) {
-        if (left_trigger > 8192) input.buttons |= kPspLTrigger;
-        if (right_trigger > 8192) input.buttons |= kPspRTrigger;
-    }
-    if (right_trigger > 8192) input.accelerate = true;
-    if (left_trigger > 8192) input.brake = true;
-    const std::uint8_t pad_x = stick_to_psp(axis(SDL_CONTROLLER_AXIS_LEFTX), false);
-    const std::uint8_t pad_y = stick_to_psp(axis(SDL_CONTROLLER_AXIS_LEFTY), false);
-    if (pad_x != 128u || pad_y != 128u) {
-        input.analog_x = pad_x;
-        input.analog_y = pad_y;
-    }
-    const int camera_x = stick_to_psp(axis(SDL_CONTROLLER_AXIS_RIGHTX), false) - 128;
-    int camera_y = stick_to_psp(axis(SDL_CONTROLLER_AXIS_RIGHTY), true) - 128;
-    if (controls.invert_camera_y) camera_y = -camera_y;
-    if (camera_x != 0 || camera_y != 0) {
-        input.camera_x = std::clamp(camera_x, -127, 127);
-        input.camera_y = std::clamp(camera_y, -127, 127);
-    }
+    apply_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, controls.bindings.left_stick);
+    apply_stick(SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY, controls.bindings.right_stick);
     return publish();
 }
 

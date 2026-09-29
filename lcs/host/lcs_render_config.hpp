@@ -1,5 +1,7 @@
 #pragma once
 
+#include "lcs_key_bindings.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -151,6 +153,7 @@ struct ControlsConfiguration {
     bool invert_camera_y{false};
     std::uint32_t ped_camera_up_limit_degrees{45u};
     bool modern_control_scheme{false};
+    ControlBindings bindings{default_control_bindings()};
 };
 
 struct LcsConfiguration {

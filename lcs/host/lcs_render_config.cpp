@@ -410,6 +410,13 @@ void apply_controls_key(LcsConfiguration &config, const std::string &key,
             warning(config, line, "Controls.ModernControlScheme expects true/false");
         return;
     }
+    std::string binding_warning;
+    if (apply_control_binding(config.controls.bindings, key, value, binding_warning) ||
+        apply_pad_binding(config.controls.bindings, key, value, binding_warning) ||
+        apply_stick_binding(config.controls.bindings, key, value, binding_warning)) {
+        if (!binding_warning.empty()) warning(config, line, binding_warning);
+        return;
+    }
     warning(config, line, "unknown [Controls] key '" + key + "'");
 }
 
