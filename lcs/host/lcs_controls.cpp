@@ -21,6 +21,7 @@ std::atomic<std::int64_t> g_last_mouse_camera_ms{0};
 std::atomic<std::int32_t> g_mouse_camera_dx{0};
 std::atomic<std::int32_t> g_mouse_camera_dy{0};
 std::atomic<std::int64_t> g_last_mouse_camera_take_ms{0};
+std::atomic<std::int64_t> g_last_aim_ms{0};
 
 constexpr std::uint32_t kPadCross = 42u;
 constexpr std::uint32_t kPadSquare = 38u;
@@ -140,11 +141,17 @@ static float mouse_aim_angle(std::atomic<std::int32_t> &counts, float sign, floa
 }
 
 float lcs_mouse_aim_turn_angle(float game_angle, float fov) noexcept {
+    g_last_aim_ms.store(now_ms(), std::memory_order_relaxed);
     return mouse_aim_angle(g_mouse_camera_dx, -1.0f, game_angle, fov);
 }
 
 float lcs_mouse_aim_pitch_angle(float game_angle, float fov) noexcept {
     return mouse_aim_angle(g_mouse_camera_dy, pitch_sign(), game_angle, fov);
+}
+
+bool lcs_player_aiming() noexcept {
+    const std::int64_t last = g_last_aim_ms.load(std::memory_order_relaxed);
+    return last != 0 && now_ms() - last < 250;
 }
 
 bool lcs_camera_hook_enabled() noexcept {

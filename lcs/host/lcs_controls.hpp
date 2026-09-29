@@ -9,6 +9,7 @@ namespace lcs {
 [[nodiscard]] int lcs_camera_axis_y() noexcept;
 void lcs_camera_set_axes(int x, int y) noexcept;
 [[nodiscard]] bool lcs_camera_in_use() noexcept;
+[[nodiscard]] bool lcs_player_aiming() noexcept;
 
 [[nodiscard]] std::uint32_t lcs_accelerate_pad_offset() noexcept;
 [[nodiscard]] std::uint32_t lcs_brake_pad_offset() noexcept;

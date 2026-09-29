@@ -671,8 +671,13 @@ HostInputState display_window_input() {
     static int wheel_hold = 0;
     static std::uint32_t wheel_button = 0u;
     if (focused && wheel != 0) {
-        wheel_button = wheel > 0 ? kPspLeft : kPspRight;
-        wheel_hold = 4;
+        if (lcs_player_aiming()) {
+            wheel_button = wheel > 0 ? kPspSquare : kPspCross;
+            wheel_hold = 8;
+        } else {
+            wheel_button = wheel > 0 ? kPspLeft : kPspRight;
+            wheel_hold = 4;
+        }
     }
     if (wheel_hold > 0) {
         --wheel_hold;
