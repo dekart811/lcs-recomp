@@ -243,7 +243,7 @@ std::uint32_t find_memory_type(VulkanState &s, std::uint32_t bits, VkMemoryPrope
 
 bool create_buffer(VulkanState &s, VkDeviceSize size, VkBufferUsageFlags usage,
                    VkMemoryPropertyFlags properties, VkBuffer &buffer, VkDeviceMemory &memory,
-                   void **mapped, std::string &error) {
+                   void **mapped, std::string &error, bool cpu_reads = false) {
     VkBufferCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     info.size = size;
@@ -258,7 +258,12 @@ bool create_buffer(VulkanState &s, VkDeviceSize size, VkBufferUsageFlags usage,
     VkMemoryAllocateInfo alloc{};
     alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     alloc.allocationSize = requirements.size;
-    alloc.memoryTypeIndex = find_memory_type(s, requirements.memoryTypeBits, properties);
+    // The first host-visible coherent type is write-combined. Reading it is slow.
+    alloc.memoryTypeIndex = cpu_reads ? find_memory_type(s, requirements.memoryTypeBits,
+                                                         properties | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+                                      : 0xFFFFFFFFu;
+    if (alloc.memoryTypeIndex == 0xFFFFFFFFu)
+        alloc.memoryTypeIndex = find_memory_type(s, requirements.memoryTypeBits, properties);
     if (alloc.memoryTypeIndex == 0xFFFFFFFFu ||
         vkAllocateMemory(s.device, &alloc, nullptr, &memory) != VK_SUCCESS ||
         vkBindBufferMemory(s.device, buffer, memory, 0) != VK_SUCCESS) {
@@ -1504,7 +1509,7 @@ bool create_backend(VulkanState &s, std::string &error) {
         !create_buffer(s, uniform_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host,
                        s.uniforms, s.uniform_memory, &s.uniform_mapped, error) ||
         !create_buffer(s, readback_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, host,
-                       s.readback, s.readback_memory, &s.readback_mapped, error))
+                       s.readback, s.readback_memory, &s.readback_mapped, error, true))
         return false;
     s.report.transfer_buffer_created = true;
     s.report.transfer_memory_mapped = true;
