@@ -19,4 +19,11 @@ void lcs_set_host_drive_inputs(bool accelerate, bool brake) noexcept;
 void lcs_note_vehicle_control_read() noexcept;
 [[nodiscard]] bool lcs_player_in_vehicle() noexcept;
 
+template <typename Memory>
+[[nodiscard]] bool lcs_guest_player_in_vehicle(Memory &memory) {
+    const std::uint32_t slot = memory.aot_load8(0x08B5E054u);
+    const std::uint32_t ped = memory.aot_load32(0x08B89A10u + slot * 368u);
+    return ped != 0u && memory.aot_load8(ped + 1336u) != 0u;
+}
+
 }

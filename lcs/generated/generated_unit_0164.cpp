@@ -10028,10 +10028,11 @@ L_08A97F70:
     }
 L_08A97F78:
     {
-        lcs::lcs_note_vehicle_control_read();
+        const bool driving = lcs::lcs_guest_player_in_vehicle(aot_mem);
+        if (driving) lcs::lcs_note_vehicle_control_read();
         std::int16_t brake = static_cast<std::int16_t>(
-            aot_mem.aot_load16(ctx.gpr[4] + lcs::lcs_brake_pad_offset()));
-        if (brake == 0 && lcs::lcs_host_brake()) brake = 255;
+            aot_mem.aot_load16(ctx.gpr[4] + (driving ? lcs::lcs_brake_pad_offset() : 38u)));
+        if (driving && brake == 0 && lcs::lcs_host_brake()) brake = 255;
         ctx.gpr[2] = (static_cast<std::uint32_t>(static_cast<std::int32_t>(brake)));
     }
     goto L_08A97F7C;
