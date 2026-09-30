@@ -200,6 +200,15 @@ struct DirectoryHandle {
     std::size_t index{};
 };
 
+// ELF directory names are uppercase.
+std::string disc_directory_name(const std::filesystem::path &path) {
+    std::string name = path.filename().string();
+    for (char &ch : name) {
+        if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
+    }
+    return name;
+}
+
 struct RawSectorFile {
     std::uint64_t base{};
     std::uint64_t size{};
@@ -3747,7 +3756,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 DirectoryHandle handle;
                 for (const auto &entry : std::filesystem::directory_iterator(native)) handle.entries.push_back(entry);
                 std::sort(handle.entries.begin(), handle.entries.end(), [](const auto &a, const auto &b) {
-                    return a.path().filename().string() < b.path().filename().string();
+                    return disc_directory_name(a.path()) < disc_directory_name(b.path());
                 });
                 const auto fd = file_table.next_fd++;
                 file_table.directories.emplace(fd, std::move(handle));
@@ -3781,13 +3790,13 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                     rt.memory().store32(dirent + 12u, static_cast<std::uint32_t>(disc_file->size >> 32u));
                     rt.memory().store32(dirent + 0x40u, disc_file->start_sector);
                     if (std::getenv("PSPRECOMP_IO_DIAG") != nullptr) {
-                        std::cerr << "[io] sceIoDread file=\"" << entry.path().filename().string()
+                        std::cerr << "[io] sceIoDread file=\"" << disc_directory_name(entry.path())
                                   << "\" sector=" << disc_file->start_sector
                                   << " size=" << disc_file->size << "\n";
                     }
                 }
             }
-            const std::string name = entry.path().filename().string();
+            const std::string name = disc_directory_name(entry.path());
             std::vector<std::uint8_t> bytes(name.begin(), name.end());
             bytes.push_back(0u);
             if (bytes.size() > 256u) bytes.resize(256u);

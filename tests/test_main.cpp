@@ -1767,6 +1767,40 @@ int main() {
         try { (void)runtime.translate_path("disc0:/../secret"); } catch (...) { traversal_rejected = true; }
         require(traversal_rejected, "Path traversal was not rejected");
 
+        const auto case_root = std::filesystem::temp_directory_path() / "psprecomp_case_test";
+        std::filesystem::remove_all(case_root);
+        const auto movie = case_root / "psp_game" / "usrdir" / "movies";
+        std::filesystem::create_directories(movie);
+        {
+            std::ofstream out(movie / "logo.pmf", std::ios::binary);
+            out << "pmf";
+        }
+        runtime.set_game_root(case_root);
+        const auto folded = runtime.translate_path("disc0:/PSP_GAME/USRDIR/MOVIES/LOGO.PMF");
+        require(std::filesystem::equivalent(folded, movie / "logo.pmf"),
+                "Case-insensitive disc path failed");
+        const auto folded_again = runtime.translate_path("disc0:/PSP_GAME/USRDIR/MOVIES/LOGO.PMF");
+        require(folded_again == folded, "Folded disc path was not stable");
+        const auto missing = runtime.translate_path("disc0:/PSP_GAME/USRDIR/MOVIES/NO_SUCH.BIN");
+        require(missing.filename() == "NO_SUCH.BIN", "Missing disc file kept the guest name");
+        require(std::filesystem::equivalent(missing.parent_path(), movie),
+                "Missing disc file lost the folded parent");
+        std::filesystem::remove_all(case_root);
+
+        const auto exact_root = std::filesystem::temp_directory_path() / "psprecomp_case_exact";
+        std::filesystem::remove_all(exact_root);
+        const auto exact_file = exact_root / "PSP_GAME" / "USRDIR" / "data.bin";
+        std::filesystem::create_directories(exact_file.parent_path());
+        {
+            std::ofstream out(exact_file, std::ios::binary);
+            out << "x";
+        }
+        runtime.set_game_root(exact_root);
+        const auto exact = runtime.translate_path("disc0:/PSP_GAME/USRDIR/data.bin");
+        require(std::filesystem::equivalent(exact, exact_file), "Exact disc path failed");
+        require(exact.filename() == "data.bin", "Exact disc path changed case");
+        std::filesystem::remove_all(exact_root);
+
         const auto temp = std::filesystem::temp_directory_path() / "psprecomp_sha_test.txt";
         { std::ofstream out(temp, std::ios::binary); out << "abc"; }
         require(psprecomp::sha256_file(temp) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
