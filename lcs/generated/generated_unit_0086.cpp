@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
+#include "lcs_controls.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -4107,6 +4108,7 @@ L_0895DA60:
     if (rt.invoke_chained_direct<&recomp_unit_0189_entry, 189u, 840u, 0x08AFBA58u>(ctx, &aot_mem) && ctx.pc == 0x0895DA70u) goto L_0895DA70;
     return;
 L_0895DA70:
+    if (ctx.gpr[2] != 0u && ctx.gpr[2] == lcs::lcs_guest_player_ped(aot_mem)) goto L_0895DA78;
     ctx.gpr[31] = (0x0895DA78u);
     ctx.gpr[4] = (ctx.gpr[2] | 0u);
     if (rt.invoke_chained_direct<&recomp_unit_0030_entry, 30u, 135u, 0x0887C9D8u>(ctx, &aot_mem) && ctx.pc == 0x0895DA78u) goto L_0895DA78;
