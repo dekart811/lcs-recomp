@@ -322,6 +322,8 @@ private:
     std::unordered_map<std::uint32_t, NativeFastPath> native_fast_paths_;
     std::vector<const HleFunction *> import_bindings_;
     std::filesystem::path game_root_;
+    // Cached when the extract case differs.
+    mutable std::unordered_map<std::string, std::filesystem::path> folded_paths_;
     bool stopped_{};
     std::string stop_reason_;
     bool hle_histogram_enabled_{};

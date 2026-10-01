@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <system_error>
 #include <unordered_map>
 #include <vector>
 
@@ -492,8 +493,26 @@ void Runtime::register_hle(std::string library, std::uint32_t nid, HleFunction f
 bool Runtime::has_function(std::uint32_t address) const { return lookup_function(address) != nullptr; }
 std::size_t Runtime::function_count() const noexcept { return functions_.size(); }
 
-void Runtime::set_game_root(std::filesystem::path root) { game_root_ = std::filesystem::weakly_canonical(std::move(root)); }
+void Runtime::set_game_root(std::filesystem::path root) {
+    game_root_ = std::filesystem::weakly_canonical(std::move(root));
+    folded_paths_.clear();
+}
 const std::filesystem::path &Runtime::game_root() const noexcept { return game_root_; }
+
+namespace {
+bool ascii_iequal(std::string_view left, std::string_view right) {
+    if (left.size() != right.size()) return false;
+    const auto fold = [](unsigned char value) {
+        return value >= 'A' && value <= 'Z' ? static_cast<unsigned char>(value - 'A' + 'a') : value;
+    };
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        if (fold(static_cast<unsigned char>(left[index])) !=
+            fold(static_cast<unsigned char>(right[index])))
+            return false;
+    }
+    return true;
+}
+}
 
 std::filesystem::path Runtime::translate_path(const std::string &psp_path) const {
     std::string relative = psp_path;
@@ -506,7 +525,53 @@ std::filesystem::path Runtime::translate_path(const std::string &psp_path) const
         if (part == "..") throw Error("Rejected PSP path traversal: " + psp_path);
         if (part != ".") clean /= part;
     }
-    return game_root_ / clean;
+    const std::string key = clean.generic_string();
+    if (const auto cached = folded_paths_.find(key); cached != folded_paths_.end())
+        return cached->second;
+
+    std::error_code error;
+    const std::filesystem::path direct = game_root_ / clean;
+    if (std::filesystem::exists(direct, error) && !error) return direct;
+
+    // Disc paths are case-insensitive.
+    std::filesystem::path resolved = game_root_;
+    bool folded = false;
+    bool missing = false;
+    for (const auto &part : clean) {
+        if (missing) {
+            resolved /= part;
+            continue;
+        }
+        error.clear();
+        const std::filesystem::path exact = resolved / part;
+        if (std::filesystem::exists(exact, error) && !error) {
+            resolved = exact;
+            continue;
+        }
+        error.clear();
+        if (!std::filesystem::is_directory(resolved, error) || error) {
+            missing = true;
+            resolved /= part;
+            continue;
+        }
+        bool matched = false;
+        error.clear();
+        for (std::filesystem::directory_iterator it(resolved, error), end;
+             !error && it != end; it.increment(error)) {
+            const std::filesystem::path name = it->path().filename();
+            if (!ascii_iequal(name.string(), part.string())) continue;
+            resolved = it->path();
+            matched = true;
+            if (name != part) folded = true;
+            break;
+        }
+        if (!matched) {
+            missing = true;
+            resolved /= part;
+        }
+    }
+    if (folded) folded_paths_.emplace(key, resolved);
+    return resolved;
 }
 
 void Runtime::run(std::uint32_t entry, std::uint64_t max_dispatches) {
