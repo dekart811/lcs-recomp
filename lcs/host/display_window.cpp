@@ -6,6 +6,7 @@
 #include "lcs_controls.hpp"
 #include "lcs_display_menu.hpp"
 #include "lcs_menu.hpp"
+#include "lcs_key_bindings.hpp"
 #include "lcs_render_config.hpp"
 
 #if defined(_WIN32)
@@ -44,51 +45,52 @@ void discard_pending_pointer() noexcept {
     g_mouse_dy.store(0, std::memory_order_relaxed);
 }
 
-constexpr std::uint32_t kPspSelect = 0x000001u;
-constexpr std::uint32_t kPspStart = 0x000008u;
-constexpr std::uint32_t kPspUp = 0x000010u;
-constexpr std::uint32_t kPspRight = 0x000020u;
-constexpr std::uint32_t kPspDown = 0x000040u;
-constexpr std::uint32_t kPspLeft = 0x000080u;
-constexpr std::uint32_t kPspLTrigger = 0x000100u;
-constexpr std::uint32_t kPspRTrigger = 0x000200u;
-constexpr std::uint32_t kPspTriangle = 0x001000u;
-constexpr std::uint32_t kPspCircle = 0x002000u;
-constexpr std::uint32_t kPspCross = 0x004000u;
-constexpr std::uint32_t kPspSquare = 0x008000u;
-
-struct KeyBinding {
-    int virtual_key;
-    std::uint32_t psp_button;
-};
-
-constexpr KeyBinding kKeyBindings[] = {
-    {VK_SPACE, kPspCross},
-    {VK_LSHIFT, kPspSquare},
-    {VK_RSHIFT, kPspSquare},
-    {'F', kPspTriangle},
-    {VK_RETURN, kPspTriangle},
-    {'Q', kPspLeft},
-    {'E', kPspRight},
-    {'H', kPspLTrigger},
-    {VK_UP, kPspUp},
-    {VK_DOWN, kPspDown},
-    {VK_LEFT, kPspLeft},
-    {VK_RIGHT, kPspRight},
-    {VK_ESCAPE, kPspStart},
-    {'V', kPspSelect},
-};
-
-constexpr KeyBinding kMouseBindings[] = {
-    {VK_LBUTTON, kPspCircle},
-    {VK_RBUTTON, kPspRTrigger},
-    {VK_MBUTTON, kPspLTrigger},
-};
-
-constexpr int kMoveForward = 'W';
-constexpr int kMoveBack = 'S';
-constexpr int kMoveLeft = 'A';
-constexpr int kMoveRight = 'D';
+int win32_virtual_key(HostKey key) noexcept {
+    const int id = static_cast<int>(key);
+    if (host_key_in(key, HostKey::A, HostKey::Z))
+        return 'A' + (id - static_cast<int>(HostKey::A));
+    if (host_key_in(key, HostKey::Digit0, HostKey::Digit9))
+        return '0' + (id - static_cast<int>(HostKey::Digit0));
+    if (host_key_in(key, HostKey::F1, HostKey::F12))
+        return VK_F1 + (id - static_cast<int>(HostKey::F1));
+    if (host_key_in(key, HostKey::Numpad0, HostKey::Numpad9))
+        return VK_NUMPAD0 + (id - static_cast<int>(HostKey::Numpad0));
+    switch (key) {
+    case HostKey::Space: return VK_SPACE;
+    case HostKey::Enter: return VK_RETURN;
+    case HostKey::Escape: return VK_ESCAPE;
+    case HostKey::Tab: return VK_TAB;
+    case HostKey::Backspace: return VK_BACK;
+    case HostKey::LeftShift: return VK_LSHIFT;
+    case HostKey::RightShift: return VK_RSHIFT;
+    case HostKey::LeftCtrl: return VK_LCONTROL;
+    case HostKey::RightCtrl: return VK_RCONTROL;
+    case HostKey::LeftAlt: return VK_LMENU;
+    case HostKey::RightAlt: return VK_RMENU;
+    case HostKey::Up: return VK_UP;
+    case HostKey::Down: return VK_DOWN;
+    case HostKey::Left: return VK_LEFT;
+    case HostKey::Right: return VK_RIGHT;
+    case HostKey::NumpadPlus: return VK_ADD;
+    case HostKey::NumpadMinus: return VK_SUBTRACT;
+    case HostKey::Delete: return VK_DELETE;
+    case HostKey::Insert: return VK_INSERT;
+    case HostKey::Home: return VK_HOME;
+    case HostKey::End: return VK_END;
+    case HostKey::PageUp: return VK_PRIOR;
+    case HostKey::PageDown: return VK_NEXT;
+    case HostKey::Comma: return VK_OEM_COMMA;
+    case HostKey::Period: return VK_OEM_PERIOD;
+    case HostKey::Minus: return VK_OEM_MINUS;
+    case HostKey::Equals: return VK_OEM_PLUS;
+    case HostKey::MouseLeft: return VK_LBUTTON;
+    case HostKey::MouseRight: return VK_RBUTTON;
+    case HostKey::MouseMiddle: return VK_MBUTTON;
+    case HostKey::Mouse4: return VK_XBUTTON1;
+    case HostKey::Mouse5: return VK_XBUTTON2;
+    default: return 0;
+    }
+}
 
 bool key_down(int virtual_key) noexcept {
     return (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
@@ -120,6 +122,8 @@ constexpr std::uint16_t kPadDpadLeft = 0x0004u;
 constexpr std::uint16_t kPadDpadRight = 0x0008u;
 constexpr std::uint16_t kPadStart = 0x0010u;
 constexpr std::uint16_t kPadBack = 0x0020u;
+constexpr std::uint16_t kPadLeftThumb = 0x0040u;
+constexpr std::uint16_t kPadRightThumb = 0x0080u;
 constexpr std::uint16_t kPadLeftShoulder = 0x0100u;
 constexpr std::uint16_t kPadRightShoulder = 0x0200u;
 constexpr std::uint16_t kPadA = 0x1000u;
@@ -139,16 +143,6 @@ PfnXInputGetState xinput_get_state() noexcept {
         return nullptr;
     }();
     return resolved;
-}
-
-std::uint8_t stick_to_psp(std::int16_t value, bool invert) noexcept {
-    constexpr int kDeadZone = 7849;
-    int magnitude = std::abs(static_cast<int>(value));
-    if (magnitude <= kDeadZone) return 128u;
-    magnitude = (magnitude - kDeadZone) * 32767 / (32767 - kDeadZone);
-    int signed_value = value < 0 ? -magnitude : magnitude;
-    if (invert) signed_value = -signed_value;
-    return static_cast<std::uint8_t>(std::clamp(128 + signed_value * 127 / 32767, 0, 255));
 }
 
 void update_cursor_clip(HWND hwnd, bool capture) noexcept {
@@ -629,32 +623,20 @@ HostInputState display_window_input() {
     const ControlsConfiguration &controls = lcs_render_configuration().controls;
 
     if (focused) {
-        for (const KeyBinding &binding : kKeyBindings)
-            if (key_down(binding.virtual_key)) input.buttons |= binding.psp_button;
-        if (cursor_in_client(g_window))
-            for (const KeyBinding &binding : kMouseBindings)
-                if (key_down(binding.virtual_key)) input.buttons |= binding.psp_button;
-        if (driving) {
-            input.buttons &= ~(kPspCross | kPspRTrigger);
-            if (key_down(VK_SPACE)) input.buttons |= kPspRTrigger;
-        }
-
-        int move_x = 0;
-        int move_y = 0;
-        if (key_down(kMoveLeft)) move_x -= 1;
-        if (key_down(kMoveRight)) move_x += 1;
-        if (!driving) {
-            if (key_down(kMoveForward)) move_y -= 1;
-            if (key_down(kMoveBack)) move_y += 1;
-        } else {
-            if (key_down(VK_UP)) move_y -= 1;
-            if (key_down(VK_DOWN)) move_y += 1;
-        }
-        input.accelerate = key_down(kMoveForward);
-        input.brake = key_down(kMoveBack);
-        const int reach = key_down(VK_LMENU) ? 60 : 127;
-        input.analog_x = static_cast<std::uint8_t>(std::clamp(128 + move_x * reach, 0, 255));
-        input.analog_y = static_cast<std::uint8_t>(std::clamp(128 + move_y * reach, 0, 255));
+        const bool mouse_in_window = cursor_in_client(g_window);
+        const auto is_down = [&](HostKey key) {
+            if (host_key_is_mouse(key) && !mouse_in_window) return false;
+            const int virtual_key = win32_virtual_key(key);
+            return virtual_key != 0 && key_down(virtual_key);
+        };
+        const KeyboardSample keys = sample_keyboard(controls.bindings, driving, is_down);
+        input.buttons |= keys.buttons;
+        input.accelerate = keys.accelerate;
+        input.brake = keys.brake;
+        input.analog_x = static_cast<std::uint8_t>(
+            std::clamp(128 + keys.move_x * keys.reach, 0, 255));
+        input.analog_y = static_cast<std::uint8_t>(
+            std::clamp(128 + keys.move_y * keys.reach, 0, 255));
 
         const int sensitivity = static_cast<int>(controls.mouse_sensitivity);
         const auto camera_response = [sensitivity](std::int32_t delta) {
@@ -675,7 +657,7 @@ HostInputState display_window_input() {
             wheel_button = wheel > 0 ? kPspSquare : kPspCross;
             wheel_hold = 8;
         } else {
-            wheel_button = wheel > 0 ? kPspLeft : kPspRight;
+            wheel_button = binding_wheel_buttons(controls.bindings, wheel > 0, driving);
             wheel_hold = 4;
         }
     }
@@ -689,38 +671,46 @@ HostInputState display_window_input() {
         XInputStatePacket pad{};
         if (get_state(0u, &pad) == ERROR_SUCCESS) {
             const std::uint16_t b = pad.gamepad.buttons;
-            if (b & kPadA) input.buttons |= kPspCross;
-            if (b & kPadX) input.buttons |= kPspSquare;
-            if (b & kPadY) input.buttons |= kPspTriangle;
-            if (b & kPadB) input.buttons |= kPspCircle;
-            if (b & kPadLeftShoulder) input.buttons |= kPspLTrigger;
-            if (b & kPadRightShoulder) input.buttons |= kPspRTrigger;
-            if (b & kPadStart) input.buttons |= kPspStart;
-            if (b & kPadBack) input.buttons |= kPspSelect;
-            if (b & kPadDpadUp) input.buttons |= kPspUp;
-            if (b & kPadDpadDown) input.buttons |= kPspDown;
-            if (b & kPadDpadLeft) input.buttons |= kPspLeft;
-            if (b & kPadDpadRight) input.buttons |= kPspRight;
-            if (!driving) {
-                if (pad.gamepad.left_trigger > 64u) input.buttons |= kPspLTrigger;
-                if (pad.gamepad.right_trigger > 64u) input.buttons |= kPspRTrigger;
-            }
-            if (pad.gamepad.right_trigger > 64u) input.accelerate = true;
-            if (pad.gamepad.left_trigger > 64u) input.brake = true;
-
-            const std::uint8_t pad_x = stick_to_psp(pad.gamepad.lx, false);
-            const std::uint8_t pad_y = stick_to_psp(pad.gamepad.ly, true);
-            if (pad_x != 128u || pad_y != 128u) {
-                input.analog_x = pad_x;
-                input.analog_y = pad_y;
-            }
-            const int camera_x = stick_to_psp(pad.gamepad.rx, false) - 128;
-            int camera_y = stick_to_psp(pad.gamepad.ry, false) - 128;
-            if (controls.invert_camera_y) camera_y = -camera_y;
-            if (camera_x != 0 || camera_y != 0) {
-                input.camera_x = std::clamp(camera_x, -127, 127);
-                input.camera_y = std::clamp(camera_y, -127, 127);
-            }
+            const auto pad_down = [&](PadButton button) {
+                switch (button) {
+                case PadButton::A: return (b & kPadA) != 0;
+                case PadButton::B: return (b & kPadB) != 0;
+                case PadButton::X: return (b & kPadX) != 0;
+                case PadButton::Y: return (b & kPadY) != 0;
+                case PadButton::LeftShoulder: return (b & kPadLeftShoulder) != 0;
+                case PadButton::RightShoulder: return (b & kPadRightShoulder) != 0;
+                case PadButton::Start: return (b & kPadStart) != 0;
+                case PadButton::Back: return (b & kPadBack) != 0;
+                case PadButton::DpadUp: return (b & kPadDpadUp) != 0;
+                case PadButton::DpadDown: return (b & kPadDpadDown) != 0;
+                case PadButton::DpadLeft: return (b & kPadDpadLeft) != 0;
+                case PadButton::DpadRight: return (b & kPadDpadRight) != 0;
+                case PadButton::LeftClick: return (b & kPadLeftThumb) != 0;
+                case PadButton::RightClick: return (b & kPadRightThumb) != 0;
+                case PadButton::LeftTrigger: return pad.gamepad.left_trigger > 64u;
+                case PadButton::RightTrigger: return pad.gamepad.right_trigger > 64u;
+                case PadButton::Count: return false;
+                }
+                return false;
+            };
+            const PadSample pad_sample = sample_pad(controls.bindings, driving, pad_down);
+            input.buttons |= pad_sample.buttons;
+            if (pad_sample.accelerate) input.accelerate = true;
+            if (pad_sample.brake) input.brake = true;
+            const auto apply_stick = [&](std::int16_t raw_x, std::int16_t raw_y, StickRole role) {
+                const StickReading reading =
+                    interpret_stick(role, raw_x, raw_y, true, controls.invert_camera_y);
+                if (reading.move) {
+                    input.analog_x = reading.move_x;
+                    input.analog_y = reading.move_y;
+                }
+                if (reading.camera) {
+                    input.camera_x = reading.camera_x;
+                    input.camera_y = reading.camera_y;
+                }
+            };
+            apply_stick(pad.gamepad.lx, pad.gamepad.ly, controls.bindings.left_stick);
+            apply_stick(pad.gamepad.rx, pad.gamepad.ry, controls.bindings.right_stick);
         }
     }
     return publish();
