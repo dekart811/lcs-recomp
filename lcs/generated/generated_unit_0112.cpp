@@ -3987,6 +3987,12 @@ L_089C56C8:
     ctx.pc = jump_target;
     return;
 L_089C56D0:
+    // LoadCollisionScreen.
+    jump_target = ctx.gpr[31];
+    local_pc = jump_target;
+    if (++local_transfers < 2048u) { entry_id = 0u; goto LOCAL_DISPATCH; }
+    ctx.pc = jump_target;
+    return;
     ctx.gpr[29] = (ctx.gpr[29] + static_cast<std::uint32_t>(-32));
     ctx.gpr[5] = (2229u << 16u);
     ctx.gpr[4] = (ctx.gpr[4] << 2u);
