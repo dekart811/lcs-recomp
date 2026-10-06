@@ -13,6 +13,9 @@
 #include <cstring>
 #include <cstdlib>
 #include <limits>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <iterator>
 #include <span>
 #include <sstream>
@@ -102,8 +105,111 @@ struct Dx12PixelConstants {
 };
 static_assert(sizeof(Dx12PixelConstants) == 5u * sizeof(std::uint32_t));
 
+// Textures are placed in large heaps instead of getting a committed resource
+// each; creating one costs the driver 0.3-1.8 ms no matter how small it is.
+class Dx12TexturePool : public std::enable_shared_from_this<Dx12TexturePool> {
+public:
+    static constexpr UINT64 kHeapSize = 64ull * 1024ull * 1024ull;
+    static constexpr std::size_t kMaxHeaps = 24u;
 
+    explicit Dx12TexturePool(ID3D12Device *device) : device_(device) {}
 
+    bool allocate(UINT64 size, UINT64 alignment, ID3D12Heap *&heap, std::size_t &index,
+                  UINT64 &offset) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (size == 0u || size > kHeapSize) return false;
+        for (std::size_t i = 0u; i < heaps_.size(); ++i) {
+            if (take(heaps_[i], size, alignment, offset)) {
+                index = i;
+                heap = heaps_[i].heap.Get();
+                return true;
+            }
+        }
+        if (!add_heap()) return false;
+        if (!take(heaps_.back(), size, alignment, offset)) return false;
+        index = heaps_.size() - 1u;
+        heap = heaps_.back().heap.Get();
+        return true;
+    }
+
+    void warm_up() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (heaps_.empty()) (void)add_heap();
+    }
+
+    void release(std::size_t index, UINT64 offset, UINT64 size) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (index >= heaps_.size()) return;
+        std::map<UINT64, UINT64> &free = heaps_[index].free;
+        auto next = free.lower_bound(offset);
+        if (next != free.end() && offset + size == next->first) {
+            size += next->second;
+            next = free.erase(next);
+        }
+        if (next != free.begin()) {
+            auto previous = std::prev(next);
+            if (previous->first + previous->second == offset) {
+                previous->second += size;
+                return;
+            }
+        }
+        free[offset] = size;
+    }
+
+private:
+    struct Heap {
+        ComPtr<ID3D12Heap> heap;
+        std::map<UINT64, UINT64> free;  // offset -> size
+    };
+
+    bool add_heap() {
+        if (heaps_.size() >= kMaxHeaps) return false;
+        D3D12_HEAP_DESC desc{};
+        desc.SizeInBytes = kHeapSize;
+        desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+        Heap created;
+        if (FAILED(device_->CreateHeap(&desc, IID_PPV_ARGS(&created.heap)))) return false;
+        created.free[0u] = kHeapSize;
+        heaps_.push_back(std::move(created));
+        return true;
+    }
+
+    static bool take(Heap &heap, UINT64 size, UINT64 alignment, UINT64 &offset) {
+        for (auto it = heap.free.begin(); it != heap.free.end(); ++it) {
+            const UINT64 begin = it->first;
+            const UINT64 end = begin + it->second;
+            const UINT64 start = (begin + alignment - 1u) / alignment * alignment;
+            if (start + size > end) continue;
+            heap.free.erase(it);
+            if (start > begin) heap.free[begin] = start - begin;
+            if (start + size < end) heap.free[start + size] = end - (start + size);
+            offset = start;
+            return true;
+        }
+        return false;
+    }
+
+    ID3D12Device *device_;
+    std::mutex mutex_;
+    std::vector<Heap> heaps_;
+};
+
+// Returns its range to the pool when the last reference goes away.
+struct Dx12TexturePlacement {
+    Dx12TexturePlacement(std::shared_ptr<Dx12TexturePool> owner, std::size_t heap_index,
+                         UINT64 range_offset, UINT64 range_size)
+        : pool(std::move(owner)), index(heap_index), offset(range_offset), size(range_size) {}
+    ~Dx12TexturePlacement() { pool->release(index, offset, size); }
+    Dx12TexturePlacement(const Dx12TexturePlacement &) = delete;
+    Dx12TexturePlacement &operator=(const Dx12TexturePlacement &) = delete;
+
+    std::shared_ptr<Dx12TexturePool> pool;
+    std::size_t index;
+    UINT64 offset;
+    UINT64 size;
+};
 
 struct Dx12FrameResources {
     ComPtr<ID3D12CommandAllocator> allocator;
@@ -128,11 +234,13 @@ struct Dx12FrameResources {
     UINT fps_srv{};
     UINT64 fence_value{};
     std::vector<ComPtr<ID3D12Resource>> transient_resources;
+    std::vector<std::shared_ptr<Dx12TexturePlacement>> transient_placements;
 };
 
 struct Dx12Texture {
     GeGpuDrawDescriptor descriptor{};
     ComPtr<ID3D12Resource> image;
+    std::shared_ptr<Dx12TexturePlacement> placement;
     ComPtr<ID3D12Resource> pending_upload;
     std::uint32_t width{};
     std::uint32_t height{};
@@ -187,6 +295,7 @@ struct Dx12GeState {
     std::vector<Dx12Batch> batches;
     std::vector<std::byte> frame_rgba;
     std::vector<std::byte> last_texture_rgba;
+    std::shared_ptr<Dx12TexturePool> texture_pool;
 
     ComPtr<IDXGIFactory6> factory;
     ComPtr<IDXGIAdapter1> adapter;
@@ -385,13 +494,38 @@ D3D12_CPU_DESCRIPTOR_HANDLE swap_rtv(Dx12GeState &s, UINT index) noexcept {
     return h;
 }
 
-std::uint64_t fnv1a64(std::span<const std::byte> bytes) noexcept {
-    std::uint64_t hash = 1469598103934665603ull;
-    for (const std::byte b : bytes) {
-        hash ^= static_cast<std::uint8_t>(b);
-        hash *= 1099511628211ull;
+std::uint64_t hash_bytes(std::span<const std::byte> bytes) noexcept {
+    constexpr std::uint64_t kMul = 0x9E3779B97F4A7C15ull;
+    std::array<std::uint64_t, 4> lane{0x243F6A8885A308D3ull, 0x13198A2E03707344ull,
+                                      0xA4093822299F31D0ull, 0x082EFA98EC4E6C89ull};
+    const std::byte *data = bytes.data();
+    std::size_t remaining = bytes.size();
+    const auto mix = [](std::uint64_t state, std::uint64_t word) noexcept {
+        state = (state ^ word) * kMul;
+        return state ^ (state >> 29u);
+    };
+    while (remaining >= 32u) {
+        std::array<std::uint64_t, 4> words;
+        std::memcpy(words.data(), data, sizeof(words));
+        for (std::size_t i = 0u; i < 4u; ++i) lane[i] = mix(lane[i], words[i]);
+        data += 32u;
+        remaining -= 32u;
     }
-    return hash;
+    std::uint64_t tail = 0u;
+    while (remaining >= 8u) {
+        std::uint64_t word;
+        std::memcpy(&word, data, sizeof(word));
+        tail = mix(tail, word);
+        data += 8u;
+        remaining -= 8u;
+    }
+    if (remaining != 0u) {
+        std::uint64_t word = 0u;
+        std::memcpy(&word, data, remaining);
+        tail = mix(tail, word);
+    }
+    std::uint64_t hash = mix(mix(mix(mix(tail, lane[0]), lane[1]), lane[2]), lane[3]);
+    return mix(hash, bytes.size());
 }
 
 std::uint32_t packed_texture_control(const GeGpuDrawDescriptor &draw, bool enabled) noexcept {
@@ -2036,6 +2170,38 @@ void clear_texture_lookup_cache(Dx12GeState &s) noexcept {
     s.last_texture_lookup_key = 0u;
 }
 
+HRESULT create_texture_image(Dx12GeState &s, const D3D12_RESOURCE_DESC &desc,
+                             Dx12Texture &texture) noexcept {
+    if (!s.texture_pool) s.texture_pool = std::make_shared<Dx12TexturePool>(s.device.Get());
+    const std::array<UINT64, 2> alignments{D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT, 0u};
+    for (const UINT64 alignment : alignments) {
+        D3D12_RESOURCE_DESC placed = desc;
+        placed.Alignment = alignment;
+        const D3D12_RESOURCE_ALLOCATION_INFO info =
+            s.device->GetResourceAllocationInfo(0u, 1u, &placed);
+        if (info.SizeInBytes == std::numeric_limits<UINT64>::max()) continue;
+        ID3D12Heap *heap = nullptr;
+        std::size_t index = 0u;
+        UINT64 offset = 0u;
+        if (!s.texture_pool->allocate(info.SizeInBytes, info.Alignment, heap, index, offset)) break;
+        auto placement =
+            std::make_shared<Dx12TexturePlacement>(s.texture_pool, index, offset, info.SizeInBytes);
+        const HRESULT hr =
+            s.device->CreatePlacedResource(heap, offset, &placed, D3D12_RESOURCE_STATE_COPY_DEST,
+                                           nullptr, IID_PPV_ARGS(&texture.image));
+        if (SUCCEEDED(hr)) {
+            texture.placement = std::move(placement);
+            return hr;
+        }
+        break;
+    }
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    return s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                             D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&texture.image));
+}
+
 bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
                             std::uint32_t base_width, std::uint32_t base_height,
                             std::uint32_t mip_levels, std::vector<std::byte> packed) noexcept {
@@ -2052,7 +2218,7 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
     }
     if (packed.size() != expected) return false;
     const std::uint64_t key = texture_key(draw);
-    const std::uint64_t checksum = fnv1a64(packed);
+    const std::uint64_t checksum = hash_bytes(packed);
     if (auto found = s.textures.find(key); found != s.textures.end()) {
         found->second.signature_epoch = s.frame_epoch;
         if (found->second.checksum == checksum) {
@@ -2060,8 +2226,11 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
             ++s.report.texture_cache_hits;
             return true;
         }
-        for (Dx12FrameResources &retire : s.frames)
+        for (Dx12FrameResources &retire : s.frames) {
             retire.transient_resources.push_back(found->second.image);
+            if (found->second.placement)
+                retire.transient_placements.push_back(found->second.placement);
+        }
         retire_texture_srv(s, found->second.srv_index);
         s.texture_cache_bytes -= std::min<std::uint64_t>(s.texture_cache_bytes, found->second.rgba8.size());
         clear_texture_lookup_cache(s);
@@ -2081,8 +2250,11 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
             ++s.report.rejected_texture_decodes;
             return false;
         }
-        for (Dx12FrameResources &retire : s.frames)
+        for (Dx12FrameResources &retire : s.frames) {
             retire.transient_resources.push_back(victim->second.image);
+            if (victim->second.placement)
+                retire.transient_placements.push_back(victim->second.placement);
+        }
         retire_texture_srv(s, victim->second.srv_index);
         s.texture_cache_bytes -= std::min<std::uint64_t>(
             s.texture_cache_bytes, victim->second.rgba8.size());
@@ -2100,8 +2272,6 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
     desc.Format = kColorFormat;
     desc.SampleDesc.Count = 1u;
     desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
     Dx12Texture texture{};
     texture.descriptor = draw;
     texture.width = base_width;
@@ -2111,10 +2281,11 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
     texture.signature_epoch = s.frame_epoch;
     texture.last_used_epoch = s.frame_epoch;
     texture.rgba8 = std::move(packed);
-    HRESULT hr = s.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                    IID_PPV_ARGS(&texture.image));
-    if (FAILED(hr)) { runtime_log_error("dx12 texture create", hr_text(hr, "CreateCommittedResource(texture)")); return false; }
+    HRESULT hr = create_texture_image(s, desc, texture);
+    if (FAILED(hr)) {
+        runtime_log_error("dx12 texture create", hr_text(hr, "CreateTextureImage"));
+        return false;
+    }
 
     texture.srv_index = allocate_texture_srv(s);
     if (texture.srv_index == 0u) {
@@ -2129,7 +2300,6 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Texture2D.MipLevels = mip_levels;
     s.device->CreateShaderResourceView(texture.image.Get(), &srv, srv_cpu(s, texture.srv_index));
-    s.last_texture_rgba.assign(texture.rgba8.begin(), texture.rgba8.begin() + static_cast<std::size_t>(base_width) * base_height * 4u);
     const std::uint32_t srv_index = texture.srv_index;
     s.texture_cache_bytes += texture.rgba8.size();
     s.pending_texture_keys.push_back(key);
@@ -2480,6 +2650,8 @@ bool create_backend(Dx12GeState &s, std::string &error) noexcept {
     s.pending_texture_keys.reserve(256u);
     s.free_texture_srvs.reserve(1024u);
     s.retired_texture_srvs.reserve(256u);
+    s.texture_pool = std::make_shared<Dx12TexturePool>(s.device.Get());
+    s.texture_pool->warm_up();
     return true;
 }
 
@@ -2506,6 +2678,7 @@ void destroy_backend(Dx12GeState &s) noexcept {
         frame.fps_upload_mapped = nullptr;
         frame.fps_vertices_mapped = nullptr;
         frame.transient_resources.clear();
+        frame.transient_placements.clear();
         frame.texture_upload_buffer.Reset();
         frame.upload_buffer.Reset();
         frame.settings_upload.Reset();
@@ -2533,6 +2706,7 @@ void destroy_backend(Dx12GeState &s) noexcept {
     s.settings_vertex_shader.Reset();
     s.pipelines.clear();
     s.textures.clear();
+    s.texture_pool.reset();
     s.pending_texture_keys.clear();
     s.free_texture_srvs.clear();
     s.retired_texture_srvs.clear();
@@ -3209,6 +3383,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
         return false;
     }
     frame.transient_resources.clear();
+    frame.transient_placements.clear();
     frame.texture_upload_cursor = 0u;
     if (frame.mapped_upload == nullptr ||
         (s.texture_upload_ring_enabled && frame.mapped_texture_upload == nullptr)) {

@@ -21,6 +21,7 @@
 #include <functional>
 #include <type_traits>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -204,18 +205,6 @@ std::int64_t parallel_pixel_threshold() noexcept {
     return threshold;
 }
 
-bool parallel_vertex_decode_enabled() noexcept {
-    static const bool enabled = [] {
-        const char *text = std::getenv("PSPRECOMP_GE_PARALLEL_VERTEX_DECODE");
-        // Rebuilt meshes are decoded again every frame.
-        if (text == nullptr || *text == '\0') return true;
-        return std::strcmp(text, "0") != 0 &&
-               std::strcmp(text, "false") != 0 && std::strcmp(text, "FALSE") != 0 &&
-               std::strcmp(text, "off") != 0 && std::strcmp(text, "OFF") != 0;
-    }();
-    return enabled;
-}
-
 bool packed_0115_gpu_decode_enabled() noexcept {
     static const bool enabled = [] {
         const char *text = std::getenv("PSPRECOMP_DX12_PACKED_0115");
@@ -235,34 +224,6 @@ bool direct_nonindexed_gpu_draw_enabled() noexcept {
                std::strcmp(text, "off") != 0 && std::strcmp(text, "OFF") != 0;
     }();
     return enabled;
-}
-
-std::size_t parallel_vertex_decode_threshold(bool expensive_vertex) noexcept {
-    static const std::size_t simple_threshold = [] {
-        constexpr std::size_t default_value = 64u;
-        const char *text = std::getenv("PSPRECOMP_GE_PARALLEL_VERTEX_THRESHOLD");
-        if (text == nullptr || *text == '\0') return default_value;
-        char *end = nullptr;
-        const unsigned long long value = std::strtoull(text, &end, 10);
-        if (end == text || *end != '\0' || value > 1'048'576ull) return default_value;
-        return static_cast<std::size_t>(value);
-    }();
-    return expensive_vertex ? std::max<std::size_t>(64u, simple_threshold / 2u)
-                            : simple_threshold;
-}
-
-unsigned parallel_vertex_decode_max_participants() noexcept {
-    static const unsigned participants = [] {
-        constexpr unsigned default_value = 6u;
-        const char *text = std::getenv("PSPRECOMP_GE_PARALLEL_VERTEX_MAX_WORKERS");
-        if (text == nullptr || *text == '\0') return default_value;
-        char *end = nullptr;
-        const unsigned long value = std::strtoul(text, &end, 10);
-        if (end == text || *end != '\0' || value < 1u || value > 32u)
-            return default_value;
-        return static_cast<unsigned>(value);
-    }();
-    return participants;
 }
 
 inline void raster_cpu_relax() noexcept {
@@ -4157,6 +4118,327 @@ bool test_ge_bounding_box(const psprecomp::GuestMemory &memory,
     return true;
 }
 
+namespace {
+
+// Draws are decoded on worker threads and committed in order.
+struct HwDrawJob {
+    enum class Submit : std::uint8_t { Direct, Indexed };
+
+    // Inputs captured at setup time.
+    const psprecomp::GuestMemory *memory{};
+    std::array<std::uint32_t, 256> commands{};
+    GeTransformState transform{};
+    VertexLayout layout{};
+    PreparedLighting prepared_lighting{};
+    GeGpuDrawDescriptor effective_draw{};
+    GeGpuHardwareTransform hw{};
+    std::vector<std::uint32_t> unique_indices;
+    std::vector<std::uint32_t> occurrence_indices;
+    std::vector<std::uint32_t> occurrence_remap;
+    const std::uint8_t *fast_0115_raw{};
+    const std::uint8_t *contiguous_raw{};
+    Vec3 fast_0115_world_normal{};
+    // The static vertex cache lives on the GE thread: setup probes it, commit fills it.
+    StaticVertexProbe probe{};
+    bool reused_vertices{};
+    std::size_t decode_count{};
+    std::uint32_t vertex_address{};
+    std::uint32_t contiguous_first{};
+    std::uint32_t uv_generation{};
+    std::uint32_t primitive{};
+    std::uint32_t count{};
+    bool has_world_normal{};
+    bool cpu_lighting_effective{};
+    bool contiguous_decode{};
+    bool indexed{};
+    bool flat_shading{};
+    bool sampled_texture_ready{};
+
+    // Outputs of prepare.
+    std::vector<GeGpuVertex> decoded_vertices;
+    std::vector<GeGpuVertex> cache_vertices;  // decoded_vertices before finalize
+    std::vector<GeGpuVertex> submitted_vertices;
+    std::vector<std::uint32_t> triangle_indices;
+    Submit submit{Submit::Indexed};
+    bool failed{};
+    std::string error;
+};
+
+bool hw_job_prepare(HwDrawJob &job) {
+    const psprecomp::GuestMemory &memory = *job.memory;
+    job.cache_vertices.clear();
+    job.submitted_vertices.clear();
+    job.triangle_indices.clear();
+    job.submit = HwDrawJob::Submit::Indexed;
+
+    if (!job.reused_vertices) {
+        job.decoded_vertices.resize(job.decode_count);
+        const Vec3 *world_normal = job.has_world_normal ? &job.fast_0115_world_normal : nullptr;
+        const PreparedLighting *lighting =
+            job.cpu_lighting_effective ? &job.prepared_lighting : nullptr;
+        for (std::size_t i = 0u; i < job.decode_count; ++i) {
+            const std::uint32_t index = job.contiguous_decode
+                                            ? job.contiguous_first + static_cast<std::uint32_t>(i)
+                                            : job.unique_indices[i];
+            const std::uint32_t address = job.vertex_address + index * job.layout.stride;
+            const std::uint8_t *raw =
+                job.contiguous_raw != nullptr && job.layout.stride != 0u
+                    ? job.contiguous_raw + i * static_cast<std::size_t>(job.layout.stride)
+                    : nullptr;
+            const bool ok =
+                job.fast_0115_raw != nullptr
+                    ? decode_model_vertex_0115_for_gpu_fast(
+                          memory, address, job.layout, job.transform, job.commands,
+                          job.cpu_lighting_effective, lighting, job.decoded_vertices[i], job.error,
+                          raw != nullptr ? raw
+                                         : job.fast_0115_raw +
+                                               i * static_cast<std::size_t>(job.layout.stride),
+                          world_normal)
+                    : decode_model_vertex_for_gpu(memory, address, job.layout, job.transform,
+                                                  job.commands, job.cpu_lighting_effective,
+                                                  lighting, job.uv_generation,
+                                                  job.decoded_vertices[i], job.error, raw);
+            if (!ok) return false;
+        }
+        if (job.probe.valid) job.cache_vertices = job.decoded_vertices;
+        if (speed_list_split_enabled())
+            g_live_vertex_decoded.fetch_add(job.decoded_vertices.size(),
+                                            std::memory_order_relaxed);
+    }
+
+    const GeGpuDrawDescriptor &draw = job.effective_draw;
+    const std::uint32_t alpha_control = pack_gpu_alpha_control(draw);
+    const std::uint32_t fog_control = pack_gpu_fog_control(draw);
+    std::uint32_t transform_control = 1u;
+    if (job.hw.cull_enabled) transform_control |= 2u;
+    if (job.hw.accept_counter_clockwise) transform_control |= 4u;
+    if (job.hw.depth_clip_enabled) transform_control |= 8u;
+
+    const auto finalize_vertex = [&](GeGpuVertex vertex) {
+        Color color{static_cast<std::uint8_t>(vertex.rgba & 0xFFu),
+                    static_cast<std::uint8_t>((vertex.rgba >> 8u) & 0xFFu),
+                    static_cast<std::uint8_t>((vertex.rgba >> 16u) & 0xFFu),
+                    static_cast<std::uint8_t>((vertex.rgba >> 24u) & 0xFFu)};
+        if (gpu_force_white_vertex_colors_enabled()) {
+            color = Color{255u, 255u, 255u, 255u};
+        } else if (gpu_geometry_debug_colors_enabled()) {
+            color = gpu_draw_debug_color(draw);
+        } else if (draw.texture_enabled && !job.sampled_texture_ready) {
+            color = gpu_texture_debug_color(draw, color);
+        }
+        vertex.rgba = pack_gpu_color(color);
+        vertex.alpha_control = alpha_control;
+        vertex.texture_control = 0u;
+        vertex.texture_env = draw.texture_env;
+        vertex.fog_control = fog_control;
+        vertex.transform_control = transform_control;
+        return vertex;
+    };
+
+    if (!job.flat_shading) {
+        for (GeGpuVertex &vertex : job.decoded_vertices) vertex = finalize_vertex(vertex);
+        if (direct_nonindexed_gpu_draw_enabled() && !job.indexed && job.primitive == 3u &&
+            (job.count % 3u) == 0u && job.decoded_vertices.size() == job.count) {
+            job.submit = HwDrawJob::Submit::Direct;
+            return true;
+        }
+    }
+
+    const auto occurrence_index = [&](std::size_t i) -> std::uint32_t {
+        if (!job.indexed) return static_cast<std::uint32_t>(i);
+        if (job.contiguous_decode) return job.occurrence_indices[i] - job.contiguous_first;
+        return job.occurrence_remap[i];
+    };
+    const auto emit_triangle = [&](std::uint32_t ia, std::uint32_t ib, std::uint32_t ic) {
+        if (job.flat_shading) {
+            GeGpuVertex a = job.decoded_vertices[ia];
+            GeGpuVertex b = job.decoded_vertices[ib];
+            GeGpuVertex c = job.decoded_vertices[ic];
+            a.rgba = b.rgba = c.rgba;
+            const std::uint32_t base = static_cast<std::uint32_t>(job.submitted_vertices.size());
+            job.submitted_vertices.push_back(finalize_vertex(a));
+            job.submitted_vertices.push_back(finalize_vertex(b));
+            job.submitted_vertices.push_back(finalize_vertex(c));
+            job.triangle_indices.push_back(base + 0u);
+            job.triangle_indices.push_back(base + 1u);
+            job.triangle_indices.push_back(base + 2u);
+        } else {
+            job.triangle_indices.push_back(ia);
+            job.triangle_indices.push_back(ib);
+            job.triangle_indices.push_back(ic);
+        }
+    };
+
+    const std::uint32_t count = job.count;
+    const std::size_t triangle_count =
+        job.primitive == 3u ? count / 3u : (count > 2u ? count - 2u : 0u);
+    job.triangle_indices.reserve(triangle_count * 3u);
+    if (job.flat_shading) job.submitted_vertices.reserve(triangle_count * 3u);
+    if (job.primitive == 3u) {
+        for (std::size_t i = 0u; i + 2u < count; i += 3u)
+            emit_triangle(occurrence_index(i), occurrence_index(i + 1u), occurrence_index(i + 2u));
+    } else if (job.primitive == 4u) {
+        for (std::size_t i = 0u; i + 2u < count; ++i) {
+            if ((i & 1u) == 0u)
+                emit_triangle(occurrence_index(i), occurrence_index(i + 1u),
+                              occurrence_index(i + 2u));
+            else
+                emit_triangle(occurrence_index(i + 1u), occurrence_index(i),
+                              occurrence_index(i + 2u));
+        }
+    } else {
+        for (std::size_t i = 1u; i + 1u < count; ++i)
+            emit_triangle(occurrence_index(0u), occurrence_index(i), occurrence_index(i + 1u));
+    }
+    return true;
+}
+
+void hw_job_commit(HwDrawJob &job) {
+    if (job.failed) return;
+    if (!job.reused_vertices) remember_static_vertices(job.probe, job.cache_vertices);
+    if (job.submit == HwDrawJob::Submit::Direct) {
+        ge_gpu_backend_accumulate_hardware_triangles(job.effective_draw, job.hw,
+                                                     job.decoded_vertices, {});
+        return;
+    }
+    const std::span<const GeGpuVertex> upload_vertices =
+        job.flat_shading ? std::span<const GeGpuVertex>(job.submitted_vertices)
+                         : std::span<const GeGpuVertex>(job.decoded_vertices);
+    GeGpuHardwareTransform fallback_hw = job.hw;
+    fallback_hw.primitive = 3u;
+    ge_gpu_backend_accumulate_hardware_triangles(job.effective_draw, fallback_hw, upload_vertices,
+                                                 job.triangle_indices);
+}
+
+// Single-producer queue: the GE thread publishes jobs and commits them in order,
+// worker threads (and the GE thread while it waits) run the prepare stage.
+class HwDrawQueue {
+public:
+    static constexpr std::size_t kSlots = 512u;
+
+    HwDrawQueue() {
+        slots_.reserve(kSlots);
+        for (std::size_t i = 0u; i < kSlots; ++i) slots_.push_back(std::make_unique<HwDrawJob>());
+        const unsigned workers = configured_workers();
+        for (unsigned i = 0u; i < workers; ++i) threads_.emplace_back([this] { worker_loop(); });
+    }
+
+    ~HwDrawQueue() {
+        stop_.store(true);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            wake_.notify_all();
+        }
+        for (std::thread &thread : threads_) thread.join();
+    }
+
+    [[nodiscard]] bool enabled() const noexcept { return !threads_.empty(); }
+    [[nodiscard]] bool pending() const noexcept { return committed_ != next_; }
+    [[nodiscard]] std::uint32_t last_target() const noexcept { return last_target_; }
+
+    // Next free slot. Commits finished jobs first if the ring is full.
+    HwDrawJob &acquire() {
+        while (next_ - committed_ >= kSlots) commit_ready(true);
+        return *slots_[next_ % kSlots];
+    }
+
+    void publish(std::uint32_t target) {
+        last_target_ = target;
+        ++next_;
+        published_.store(next_, std::memory_order_seq_cst);
+        if (sleepers_.load(std::memory_order_seq_cst) != 0u) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            wake_.notify_all();
+        }
+    }
+
+    // Commit the finished prefix; with `wait` set, until nothing is pending.
+    void commit_ready(bool wait) {
+        while (committed_ != next_) {
+            const std::size_t slot = committed_ % kSlots;
+            if (done_[slot].load(std::memory_order_acquire) == committed_ + 1u) {
+                hw_job_commit(*slots_[slot]);
+                ++committed_;
+                continue;
+            }
+            if (!wait) return;
+            if (!try_run_one()) raster_cpu_relax();
+        }
+    }
+
+    void drain() { commit_ready(true); }
+
+private:
+    static unsigned configured_workers() {
+        if (const char *text = std::getenv("PSPRECOMP_GE_DECODE_THREADS"); text && *text) {
+            const unsigned long value = std::strtoul(text, nullptr, 10);
+            return static_cast<unsigned>(std::min<unsigned long>(value, 8ul));
+        }
+        const unsigned hardware = std::thread::hardware_concurrency();
+        if (hardware >= 12u) return 4u;
+        if (hardware >= 8u) return 3u;
+        if (hardware >= 6u) return 2u;
+        if (hardware >= 4u) return 1u;
+        return 0u;
+    }
+
+    bool try_run_one() {
+        std::uint64_t claimed = claimed_.load(std::memory_order_relaxed);
+        while (claimed < published_.load(std::memory_order_acquire)) {
+            if (claimed_.compare_exchange_weak(claimed, claimed + 1u, std::memory_order_acq_rel)) {
+                const std::size_t slot = claimed % kSlots;
+                HwDrawJob &job = *slots_[slot];
+                job.failed = !hw_job_prepare(job);
+                done_[slot].store(claimed + 1u, std::memory_order_release);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void worker_loop() {
+        while (!stop_.load(std::memory_order_relaxed)) {
+            if (try_run_one()) continue;
+            for (int spin = 0; spin < 2000; ++spin) {
+                if (claimed_.load(std::memory_order_relaxed) <
+                    published_.load(std::memory_order_acquire))
+                    break;
+                raster_cpu_relax();
+            }
+            if (claimed_.load(std::memory_order_relaxed) <
+                published_.load(std::memory_order_acquire))
+                continue;
+            sleepers_.fetch_add(1u, std::memory_order_seq_cst);
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                if (claimed_.load() >= published_.load() && !stop_.load())
+                    wake_.wait_for(lock, std::chrono::milliseconds(1));
+            }
+            sleepers_.fetch_sub(1u, std::memory_order_seq_cst);
+        }
+    }
+
+    std::vector<std::unique_ptr<HwDrawJob>> slots_;
+    std::array<std::atomic<std::uint64_t>, kSlots> done_{};
+    std::atomic<std::uint64_t> published_{0u};
+    std::atomic<std::uint64_t> claimed_{0u};
+    std::atomic<unsigned> sleepers_{0u};
+    std::atomic<bool> stop_{false};
+    std::uint64_t next_{0u};       // GE thread only
+    std::uint64_t committed_{0u};  // GE thread only
+    std::uint32_t last_target_{0u};
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    std::vector<std::thread> threads_;
+};
+
+HwDrawQueue &hw_draw_queue() {
+    static HwDrawQueue queue;
+    return queue;
+}
+
+}  // namespace
+
 bool render_ge_primitive(psprecomp::GuestMemory &memory,
                          const std::array<std::uint32_t, 256> &commands,
                          const GeTransformState &transform,
@@ -4185,6 +4467,12 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
         ++g_ge_primitive_count;
         g_ge_vertex_count += count;
     }
+
+    // Draws still in flight were set up against the previous render target; the
+    // backend registers new targets while setting up a draw, so let them land first.
+    if (HwDrawQueue &queue = hw_draw_queue();
+        queue.pending() && (framebuffer_address(commands) & 0x001FFFF0u) != queue.last_target())
+        queue.drain();
 
     const bool gpu_backend_enabled = ge_gpu_backend_active();
     GeGpuDrawDescriptor gpu_draw{};
@@ -4472,14 +4760,10 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
         static thread_local std::vector<std::uint32_t> occurrence_indices;
         static thread_local std::vector<std::uint32_t> unique_indices;
         static thread_local std::vector<std::uint32_t> occurrence_remap;
-        static thread_local std::vector<GeGpuVertex> decoded_vertices;
-        static thread_local std::vector<GeGpuVertex> submitted_vertices;
         static thread_local std::vector<std::uint32_t> triangle_indices;
         occurrence_indices.clear();
         unique_indices.clear();
         occurrence_remap.clear();
-        decoded_vertices.clear();
-        submitted_vertices.clear();
         triangle_indices.clear();
 
         const bool indexed = isize != 0u;
@@ -4646,6 +4930,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                 : (needs_indices ? triangle_indices.size() / 3u : count / 3u);
             bool accepted = false;
             {
+                hw_draw_queue().drain();
                 PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
                 accepted = ge_gpu_backend_accumulate_hardware_packed_0115(
                     effective_draw, hw,
@@ -4662,200 +4947,93 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             triangle_indices.clear();
         }
 
+        // Draws with vertices outside guest memory run inline to report the error.
+        HwDrawQueue &queue = hw_draw_queue();
+        bool deferred = queue.enabled() && !collect_diagnostic_stats && !ge_phase_diag_enabled();
+        if (deferred && !contiguous_decode) {
+            for (std::uint32_t index : unique_indices) {
+                if (!memory.contains(vertex_address + index * layout.stride, layout.stride)) {
+                    deferred = false;
+                    break;
+                }
+            }
+        } else if (deferred && contiguous_raw == nullptr) {
+            deferred = false;
+        }
+
+        static thread_local HwDrawJob inline_job;
+        if (!deferred) queue.drain();
+        HwDrawJob &job = deferred ? queue.acquire() : inline_job;
         {
-        PhaseTimer vertex_timer(g_ge_vertex_decode_ns, &g_live_vertex_ns);
-        // Model-space only. Skin, morph, generated UVs, and baked light stay uncached.
-        const bool cacheable = !cpu_lighting_effective && layout.weight_type == 0u &&
-            layout.morph_count <= 1u && uv_generation == 0u;
-        const StaticVertexProbe probe = cacheable ? probe_static_vertices(
-            memory, vertex_address, contiguous_first, contiguous_decode,
-            contiguous_raw, contiguous_raw_bytes, unique_indices, layout, decode_count)
-            : StaticVertexProbe{};
-        if (reuse_static_vertices(probe, decoded_vertices)) {
-            if (speed_list_split_enabled())
+            PhaseTimer vertex_timer(g_ge_vertex_decode_ns, &g_live_vertex_ns);
+            // Model-space only. Skin, morph, generated UVs, and baked light stay uncached.
+            const bool cacheable = !cpu_lighting_effective && layout.weight_type == 0u &&
+                layout.morph_count <= 1u && uv_generation == 0u;
+            job.probe = cacheable ? probe_static_vertices(
+                memory, vertex_address, contiguous_first, contiguous_decode,
+                contiguous_raw, contiguous_raw_bytes, unique_indices, layout, decode_count)
+                : StaticVertexProbe{};
+            job.reused_vertices = reuse_static_vertices(job.probe, job.decoded_vertices);
+            if (job.reused_vertices && speed_list_split_enabled())
                 g_live_vertex_reused.fetch_add(decode_count, std::memory_order_relaxed);
-        } else {
-        decoded_vertices.resize(decode_count);
-        // A worker's thread_local copy is empty. Bind the caller's buffers.
-        std::vector<GeGpuVertex> &decoded_out = decoded_vertices;
-        const std::vector<std::uint32_t> &unique_out = unique_indices;
-        const auto decode_one = [&](std::size_t i, std::string &decode_error) -> bool {
-            const std::uint32_t index = contiguous_decode
-                ? contiguous_first + static_cast<std::uint32_t>(i) : unique_out[i];
-            const std::uint8_t *raw = contiguous_raw != nullptr && layout.stride != 0u
-                ? contiguous_raw + i * static_cast<std::size_t>(layout.stride) : nullptr;
-            if (fast_0115_raw != nullptr) {
-                return decode_model_vertex_0115_for_gpu_fast(
-                    memory, vertex_address + index * layout.stride, layout, transform, commands,
-                    cpu_lighting_effective, cpu_lighting_effective ? &prepared_lighting : nullptr,
-                    decoded_out[i], decode_error,
-                    raw != nullptr ? raw
-                                   : fast_0115_raw + i * static_cast<std::size_t>(layout.stride),
-                    fast_0115_world_normal_ptr);
-            }
-            return decode_model_vertex_for_gpu(memory, vertex_address + index * layout.stride,
-                                               layout, transform, commands,
-                                               cpu_lighting_effective,
-                                               cpu_lighting_effective ? &prepared_lighting : nullptr,
-                                               uv_generation, decoded_out[i], decode_error, raw);
-        };
+        }
+        job.memory = &memory;
+        job.commands = commands;
+        job.transform = transform;
+        job.layout = layout;
+        job.prepared_lighting = prepared_lighting;
+        job.effective_draw = effective_draw;
+        job.hw = hw;
+        job.unique_indices.swap(unique_indices);
+        job.occurrence_indices.swap(occurrence_indices);
+        job.occurrence_remap.swap(occurrence_remap);
+        job.fast_0115_raw = fast_0115_raw;
+        job.contiguous_raw = contiguous_raw;
+        job.has_world_normal = fast_0115_world_normal_ptr != nullptr;
+        if (job.has_world_normal) job.fast_0115_world_normal = fast_0115_world_normal;
+        job.decode_count = decode_count;
+        job.vertex_address = vertex_address;
+        job.contiguous_first = contiguous_first;
+        job.uv_generation = uv_generation;
+        job.primitive = primitive;
+        job.count = count;
+        job.cpu_lighting_effective = cpu_lighting_effective;
+        job.contiguous_decode = contiguous_decode;
+        job.indexed = indexed;
+        job.flat_shading = flat_shading;
+        job.sampled_texture_ready = sampled_texture_ready;
+        job.failed = false;
+        job.error.clear();
 
-        RowWorkerPool &decode_pool = RowWorkerPool::instance();
-        const bool expensive_vertex = cpu_lighting_effective || layout.weight_type != 0u;
-        const bool parallel_decode = parallel_vertex_decode_enabled() &&
-            decode_pool.worker_count() > 1u && decode_count >=
-                parallel_vertex_decode_threshold(expensive_vertex) &&
-            decode_count <= static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
-        if (parallel_decode) {
-            std::atomic<bool> decode_failed{false};
-            std::array<std::string, RowWorkerPool::kMaxThreads> decode_errors{};
-            const std::size_t vertices_per_participant = expensive_vertex ? 64u : 128u;
-            const unsigned useful_participants = std::max(2u, std::min<unsigned>(
-                std::min(decode_pool.worker_count(), parallel_vertex_decode_max_participants()),
-                static_cast<unsigned>((decode_count + vertices_per_participant - 1u) /
-                                      vertices_per_participant)));
-            decode_pool.run(0, static_cast<std::int32_t>(decode_count - 1u),
-                [&](unsigned participant, std::int32_t first, std::int32_t last) {
-                    std::string &local_error = decode_errors[participant];
-                    for (std::int32_t row = first; row <= last; ++row) {
-                        if (decode_failed.load(std::memory_order_relaxed)) break;
-                        if (!decode_one(static_cast<std::size_t>(row), local_error)) {
-                            decode_failed.store(true, std::memory_order_relaxed);
-                            break;
-                        }
-                    }
-                }, useful_participants);
-            if (decode_failed.load(std::memory_order_relaxed)) {
-                for (const std::string &local_error : decode_errors) {
-                    if (!local_error.empty()) { error = local_error; break; }
+        if (deferred) {
+            queue.publish(framebuffer_address(commands) & 0x001FFFF0u);
+            queue.commit_ready(false);
+        } else {
+            {
+                PhaseTimer vertex_timer(g_ge_vertex_decode_ns, &g_live_vertex_ns);
+                if (!hw_job_prepare(job)) {
+                    error = job.error;
+                    return false;
                 }
-                if (error.empty()) error = "parallel hardware vertex decode failed";
-                return false;
             }
-        } else {
-            for (std::size_t i = 0u; i < decode_count; ++i) {
-                if (!decode_one(i, error)) return false;
+            {
+                PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
+                hw_job_commit(job);
             }
-        }
-        remember_static_vertices(probe, decoded_vertices);
-        if (speed_list_split_enabled())
-            g_live_vertex_decoded.fetch_add(decoded_vertices.size(), std::memory_order_relaxed);
-        }
-        if (collect_diagnostic_stats) stats.decoded_vertices += decoded_vertices.size();
-        }
-
-        const std::uint32_t alpha_control = pack_gpu_alpha_control(effective_draw);
-        const std::uint32_t fog_control = pack_gpu_fog_control(effective_draw);
-        std::uint32_t transform_control = 1u;
-        if (hw.cull_enabled) transform_control |= 2u;
-        if (hw.accept_counter_clockwise) transform_control |= 4u;
-        if (hw.depth_clip_enabled) transform_control |= 8u;
-
-        auto packed_to_color = [](std::uint32_t rgba) noexcept {
-            return Color{static_cast<std::uint8_t>(rgba & 0xFFu),
-                         static_cast<std::uint8_t>((rgba >> 8u) & 0xFFu),
-                         static_cast<std::uint8_t>((rgba >> 16u) & 0xFFu),
-                         static_cast<std::uint8_t>((rgba >> 24u) & 0xFFu)};
-        };
-        auto finalize_vertex = [&](GeGpuVertex vertex) {
-            Color color = packed_to_color(vertex.rgba);
-            if (gpu_force_white_vertex_colors_enabled()) {
-                color = Color{255u, 255u, 255u, 255u};
-            } else if (gpu_geometry_debug_colors_enabled()) {
-                color = gpu_draw_debug_color(effective_draw);
-            } else if (effective_draw.texture_enabled && !sampled_texture_ready) {
-                color = gpu_texture_debug_color(effective_draw, color);
+            if (collect_diagnostic_stats) {
+                stats.decoded_vertices += job.decoded_vertices.size();
+                stats.triangles += job.submit == HwDrawJob::Submit::Direct
+                                       ? count / 3u
+                                       : job.triangle_indices.size() / 3u;
             }
-            vertex.rgba = pack_gpu_color(color);
-            vertex.alpha_control = alpha_control;
-            vertex.texture_control = 0u;
-            vertex.texture_env = effective_draw.texture_env;
-            vertex.fog_control = fog_control;
-            vertex.transform_control = transform_control;
-            return vertex;
-        };
-
-        if (!flat_shading) {
-            for (GeGpuVertex &vertex : decoded_vertices)
-                vertex = finalize_vertex(vertex);
-
-            if (direct_nonindexed_gpu_draw_enabled() &&
-                !indexed && primitive == 3u && (count % 3u) == 0u &&
-                decoded_vertices.size() == count) {
-                if (collect_diagnostic_stats) stats.triangles += count / 3u;
-                {
-                    PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
-                    ge_gpu_backend_accumulate_hardware_triangles(
-                        effective_draw, hw, decoded_vertices, {});
-                }
-                advance_stream();
-                return true;
-            }
-        }
-        const auto occurrence_index = [&](std::size_t i) -> std::uint32_t {
-            if (!indexed) return static_cast<std::uint32_t>(i);
-            if (contiguous_decode) return occurrence_indices[i] - contiguous_first;
-            return occurrence_remap[i];
-        };
-        auto emit_triangle = [&](std::uint32_t ia, std::uint32_t ib, std::uint32_t ic) {
-            if (flat_shading) {
-                GeGpuVertex a = decoded_vertices[ia];
-                GeGpuVertex b = decoded_vertices[ib];
-                GeGpuVertex c = decoded_vertices[ic];
-                const std::uint32_t flat_color = c.rgba;
-                a.rgba = b.rgba = c.rgba = flat_color;
-                const std::uint32_t base = static_cast<std::uint32_t>(submitted_vertices.size());
-                submitted_vertices.push_back(finalize_vertex(a));
-                submitted_vertices.push_back(finalize_vertex(b));
-                submitted_vertices.push_back(finalize_vertex(c));
-                triangle_indices.push_back(base + 0u);
-                triangle_indices.push_back(base + 1u);
-                triangle_indices.push_back(base + 2u);
-                ++stats.flat_shaded_primitives;
-            } else {
-                triangle_indices.push_back(ia);
-                triangle_indices.push_back(ib);
-                triangle_indices.push_back(ic);
-            }
-            if (collect_diagnostic_stats) ++stats.triangles;
-        };
-
-        const std::size_t triangle_count = primitive == 3u ? count / 3u
-            : (count > 2u ? count - 2u : 0u);
-        triangle_indices.reserve(triangle_count * 3u);
-        if (flat_shading) submitted_vertices.reserve(triangle_count * 3u);
-        if (primitive == 3u) {
-            for (std::size_t i = 0u; i + 2u < count; i += 3u)
-                emit_triangle(occurrence_index(i), occurrence_index(i + 1u),
-                              occurrence_index(i + 2u));
-        } else if (primitive == 4u) {
-            for (std::size_t i = 0u; i + 2u < count; ++i) {
-                if ((i & 1u) == 0u)
-                    emit_triangle(occurrence_index(i), occurrence_index(i + 1u),
-                                  occurrence_index(i + 2u));
-                else
-                    emit_triangle(occurrence_index(i + 1u), occurrence_index(i),
-                                  occurrence_index(i + 2u));
-            }
-        } else {
-            for (std::size_t i = 1u; i + 1u < count; ++i)
-                emit_triangle(occurrence_index(0u), occurrence_index(i),
-                              occurrence_index(i + 1u));
-        }
-
-        {
-            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
-            const std::span<const GeGpuVertex> upload_vertices = flat_shading
-                ? std::span<const GeGpuVertex>(submitted_vertices)
-                : std::span<const GeGpuVertex>(decoded_vertices);
-            GeGpuHardwareTransform fallback_hw = hw;
-            fallback_hw.primitive = 3u;
-            ge_gpu_backend_accumulate_hardware_triangles(
-                effective_draw, fallback_hw, upload_vertices, triangle_indices);
+            if (job.flat_shading && job.submit != HwDrawJob::Submit::Direct)
+                stats.flat_shaded_primitives += job.triangle_indices.size() / 3u;
         }
         advance_stream();
         return true;
     }
+
+    hw_draw_queue().drain();
 
     FragmentSetup setup = make_fragment_setup_cached(commands);
     {
@@ -5047,6 +5225,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
 }
 
 void flush_ge_deferred_rasterization(psprecomp::GuestMemory &memory) {
+    hw_draw_queue().drain();
     flush_deferred_batches(memory);
 }
 
