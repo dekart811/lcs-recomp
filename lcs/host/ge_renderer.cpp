@@ -5075,7 +5075,11 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
         const bool full_width = (max_x - min_x) * hud.display_scale_x >=
             kFullWidthFraction * 480.0f;
         const bool widescreen_surface_primitive = primitive >= 3u && primitive <= 6u;
+        const bool sky_sprite = setup.texture_enabled && gpu_draw.texture_width == 64u &&
+                                gpu_draw.texture_height == 64u &&
+                                (primitive == 3u || primitive == 6u);
         const bool hud_candidate = widescreen_surface_primitive && !setup.clear_mode &&
+            !sky_sprite &&
             !(setup.depth_test_enabled && !setup.depth_write_enabled) &&
             !(setup.texture_enabled && ge_gpu_backend_is_framebuffer_feedback_texture(gpu_draw));
 
