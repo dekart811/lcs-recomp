@@ -405,6 +405,11 @@ void apply_controls_key(LcsConfiguration &config, const std::string &key,
                     "Controls.PedCameraUpLimitDegrees must be between 10 and 85");
         return;
     }
+    if (key == "autoaim") {
+        if (!parse_bool(value, config.controls.auto_aim))
+            warning(config, line, "Controls.AutoAim expects true/false");
+        return;
+    }
     if (key == "moderncontrolscheme") {
         if (!parse_bool(value, config.controls.modern_control_scheme))
             warning(config, line, "Controls.ModernControlScheme expects true/false");

@@ -1,3 +1,4 @@
+#include "lcs_controls.hpp"
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
 #include <bit>
@@ -1763,6 +1764,8 @@ L_089AC670:
     if (rt.invoke_chained_direct<&recomp_unit_0057_entry, 57u, 491u, 0x088EABACu>(ctx, &aot_mem) && ctx.pc == 0x089AC678u) goto L_089AC678;
     return;
 L_089AC678:
+    // Strafing while firing a gun.
+    if (lcs::lcs_free_aim_active()) ctx.gpr[2] = 1u;
     { const bool branch_taken = ctx.gpr[2] == 0u;
     // nop
       if (branch_taken) {

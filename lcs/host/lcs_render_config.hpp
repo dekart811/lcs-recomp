@@ -155,6 +155,7 @@ struct ControlsConfiguration {
     bool invert_camera_y{false};
     std::uint32_t ped_camera_up_limit_degrees{45u};
     bool modern_control_scheme{false};
+    bool auto_aim{true};
     ControlBindings bindings{default_control_bindings()};
 };
 

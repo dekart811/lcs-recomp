@@ -1,6 +1,7 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
 #include "lcs_mouse.hpp"
+#include "lcs_controls.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -9353,6 +9354,15 @@ L_0894BB10:
     ctx.pc = jump_target;
     return;
 L_0894BB2C:
+    // FindWeaponLockOnTarget.
+    if (!lcs::lcs_auto_aim()) {
+        ctx.gpr[2] = 0u;
+        jump_target = ctx.gpr[31];
+        local_pc = jump_target;
+        if (++local_transfers < 2048u) { entry_id = 0u; goto LOCAL_DISPATCH; }
+        ctx.pc = jump_target;
+        return;
+    }
     ctx.gpr[29] = (ctx.gpr[29] + static_cast<std::uint32_t>(-128));
     aot_mem.aot_store32(ctx.gpr[29] + static_cast<std::uint32_t>(108), ctx.gpr[16]);
     ctx.gpr[16] = (ctx.gpr[4] | 0u);

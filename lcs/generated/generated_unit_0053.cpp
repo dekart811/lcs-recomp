@@ -1,3 +1,4 @@
+#include "lcs_controls.hpp"
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
 #include <bit>
@@ -4596,6 +4597,8 @@ L_088D99FC:
     if (rt.invoke_chained_direct<&recomp_unit_0057_entry, 57u, 491u, 0x088EABACu>(ctx, &aot_mem) && ctx.pc == 0x088D9A08u) goto L_088D9A08;
     return;
 L_088D9A08:
+    // Aim pitch follows the camera.
+    if (!lcs::lcs_auto_aim()) ctx.gpr[2] = 1u;
     { const bool branch_taken = ctx.gpr[2] == 0u;
     // nop
       if (branch_taken) {

@@ -1,3 +1,4 @@
+#include "lcs_controls.hpp"
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
 #include <bit>
@@ -2045,6 +2046,8 @@ L_08988C30:
     ctx.gpr[4] = (2232u << 16u);
     goto L_08988C38;
 L_08988C38:
+    // Third person crosshair mode.
+    if (!lcs::lcs_auto_aim()) aot_mem.aot_store8(0x08B35BDCu, 1u);
     ctx.gpr[4] = (ctx.gpr[4] + static_cast<std::uint32_t>(12960));
     ctx.gpr[5] = (aot_mem.aot_load8(ctx.gpr[4] + static_cast<std::uint32_t>(127)));
     ctx.gpr[4] = (ctx.gpr[4] + static_cast<std::uint32_t>(400));
@@ -2067,6 +2070,12 @@ L_08988C64:
       goto L_08988C6C;
     }
 L_08988C6C:
+    // Third person crosshair for guns.
+    if (!lcs::lcs_auto_aim()) {
+        const std::uint32_t weapon_type = aot_mem.aot_load32(
+            ctx.gpr[16] + 1428u + static_cast<std::uint32_t>(static_cast<std::int8_t>(aot_mem.aot_load8(ctx.gpr[16] + 1720u))) * 28u);
+        if (lcs::lcs_free_aim_weapon(weapon_type)) ctx.gpr[19] = 1u;
+    }
     ctx.gpr[31] = (0x08988C74u);
     ctx.gpr[4] = (0u | 0u);
     if (rt.invoke_chained_direct<&recomp_unit_0164_entry, 164u, 524u, 0x08A964B8u>(ctx, &aot_mem) && ctx.pc == 0x08988C74u) goto L_08988C74;
@@ -2214,6 +2223,7 @@ L_08988D8C:
       goto L_08988DC8;
     }
 L_08988DC8:
+    if (!lcs::lcs_auto_aim()) { ctx.fpr[12] = 240.0f; ctx.fpr[13] = 108.8f; }
     ctx.gpr[4] = (static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(aot_mem.aot_load8(ctx.gpr[16] + static_cast<std::uint32_t>(1720))))));
     ctx.gpr[5] = (ctx.gpr[4] << 5u);
     ctx.gpr[4] = (ctx.gpr[4] << 2u);
@@ -2232,6 +2242,7 @@ L_08988DEC:
     ctx.gpr[4] = (16793u << 16u);
     ctx.gpr[4] = (ctx.gpr[4] | 39322u);
     ctx.fpr[15] = std::bit_cast<float>(ctx.gpr[4]);
+    if (!lcs::lcs_auto_aim()) ctx.fpr[15] *= 0.6f;
     ctx.fpr[14] = ctx.fpr[12] + ctx.fpr[15];
     ctx.gpr[5] = (2277u << 16u);
     ctx.fpr[17] = ctx.fpr[13] - ctx.fpr[15];
@@ -2279,11 +2290,13 @@ L_08988E70:
       goto L_08988E78;
     }
 L_08988E78:
+    if (!lcs::lcs_auto_aim()) { ctx.fpr[12] = 240.0f; ctx.fpr[13] = 108.8f; }
     ctx.gpr[4] = (16716u << 16u);
     goto L_08988E7C;
 L_08988E7C:
     ctx.gpr[4] = (ctx.gpr[4] | 52429u);
     ctx.fpr[15] = std::bit_cast<float>(ctx.gpr[4]);
+    if (!lcs::lcs_auto_aim()) ctx.fpr[15] *= 0.6f;
     ctx.fpr[14] = ctx.fpr[12] + ctx.fpr[15];
     ctx.gpr[5] = (2277u << 16u);
     ctx.fpr[17] = ctx.fpr[13] - ctx.fpr[15];
@@ -3234,6 +3247,7 @@ L_089898C0:
     if (rt.invoke_chained_direct<&recomp_unit_0044_entry, 44u, 593u, 0x088B7AF8u>(ctx, &aot_mem) && ctx.pc == 0x089898CCu) goto L_089898CC;
     return;
 L_089898CC:
+    aot_mem.aot_store8(0x08B35BDCu, 0u);
     ctx.gpr[4] = (0u | 10u);
     ctx.gpr[31] = (0x089898D8u);
     ctx.gpr[5] = (0u | 5u);
@@ -3276,6 +3290,7 @@ L_08989900:
       goto L_08989908;
     }
 L_08989908:
+    aot_mem.aot_store8(0x08B35BDCu, 0u);
     ctx.gpr[4] = (2230u << 16u);
     aot_mem.aot_store16(ctx.gpr[4] + static_cast<std::uint32_t>(-6320), static_cast<std::uint16_t>(0u));
     ctx.gpr[4] = (2230u << 16u);

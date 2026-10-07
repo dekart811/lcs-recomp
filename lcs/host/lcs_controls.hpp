@@ -10,6 +10,10 @@ namespace lcs {
 void lcs_camera_set_axes(int x, int y) noexcept;
 [[nodiscard]] bool lcs_camera_in_use() noexcept;
 [[nodiscard]] bool lcs_player_aiming() noexcept;
+[[nodiscard]] bool lcs_auto_aim() noexcept;
+[[nodiscard]] bool lcs_free_aim_weapon(std::uint32_t weapon_type) noexcept;
+void lcs_set_free_aim(bool active) noexcept;
+[[nodiscard]] bool lcs_free_aim_active() noexcept;
 
 [[nodiscard]] std::uint32_t lcs_accelerate_pad_offset() noexcept;
 [[nodiscard]] std::uint32_t lcs_brake_pad_offset() noexcept;

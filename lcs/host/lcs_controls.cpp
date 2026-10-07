@@ -22,6 +22,7 @@ std::atomic<std::int32_t> g_mouse_camera_dx{0};
 std::atomic<std::int32_t> g_mouse_camera_dy{0};
 std::atomic<std::int64_t> g_last_mouse_camera_take_ms{0};
 std::atomic<std::int64_t> g_last_aim_ms{0};
+std::atomic<bool> g_free_aim{false};
 
 constexpr std::uint32_t kPadCross = 42u;
 constexpr std::uint32_t kPadSquare = 38u;
@@ -148,6 +149,22 @@ float lcs_mouse_aim_turn_angle(float game_angle, float fov) noexcept {
 float lcs_mouse_aim_pitch_angle(float game_angle, float fov) noexcept {
     return mouse_aim_angle(g_mouse_camera_dy, pitch_sign(), game_angle, fov);
 }
+
+bool lcs_auto_aim() noexcept {
+    static const bool value = [] {
+        const LcsConfiguration &config = lcs_render_configuration();
+        return !config.initialized || config.controls.auto_aim;
+    }();
+    return value;
+}
+
+bool lcs_free_aim_weapon(std::uint32_t weapon_type) noexcept {
+    return !lcs_auto_aim() && ((weapon_type >= 17u && weapon_type <= 27u) || (weapon_type >= 31u && weapon_type <= 33u));
+}
+
+void lcs_set_free_aim(bool active) noexcept { g_free_aim.store(active, std::memory_order_relaxed); }
+
+bool lcs_free_aim_active() noexcept { return !lcs_auto_aim() && g_free_aim.load(std::memory_order_relaxed); }
 
 bool lcs_player_aiming() noexcept {
     const std::int64_t last = g_last_aim_ms.load(std::memory_order_relaxed);

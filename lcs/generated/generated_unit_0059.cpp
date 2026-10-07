@@ -1,3 +1,4 @@
+#include "lcs_controls.hpp"
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
 #include "lcs_mouse.hpp"
@@ -5951,6 +5952,8 @@ L_088F2554:
     if (rt.invoke_chained_direct<&recomp_unit_0165_entry, 165u, 9u, 0x08A98040u>(ctx, &aot_mem) && ctx.pc == 0x088F255Cu) goto L_088F255C;
     return;
 L_088F255C:
+    // Free aim keeps the camera where the mouse put it.
+    if (!lcs::lcs_auto_aim()) ctx.gpr[2] = 0u;
     if (ctx.gpr[2] == 0u) {
     ctx.gpr[16] = (aot_mem.aot_load32(ctx.gpr[29] + static_cast<std::uint32_t>(1104)));
         goto L_088F257C;
@@ -5970,6 +5973,7 @@ L_088F257C:
     if (rt.invoke_chained_direct<&recomp_unit_0165_entry, 165u, 206u, 0x08A98890u>(ctx, &aot_mem) && ctx.pc == 0x088F2584u) goto L_088F2584;
     return;
 L_088F2584:
+    if (!lcs::lcs_auto_aim()) ctx.gpr[2] = 0u;
     ctx.gpr[4] = (16256u << 16u);
     ctx.fpr[14] = std::bit_cast<float>(ctx.gpr[4]);
     ctx.fpr[13] = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[29] + static_cast<std::uint32_t>(1064)));

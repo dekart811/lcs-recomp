@@ -1,3 +1,4 @@
+#include "lcs_controls.hpp"
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
 #include <bit>
@@ -7812,6 +7813,12 @@ L_0885B590:
     if (rt.invoke_chained_direct<&recomp_unit_0057_entry, 57u, 491u, 0x088EABACu>(ctx, &aot_mem) && ctx.pc == 0x0885B59Cu) goto L_0885B59C;
     return;
 L_0885B59C:
+    // Shots follow the camera ray through the crosshair.
+    if (!lcs::lcs_auto_aim()) {
+        ctx.gpr[2] = 1u;
+        aot_mem.aot_store32(0x08B832A0u + 384u, std::bit_cast<std::uint32_t>(0.5f));
+        aot_mem.aot_store32(0x08B832A0u + 388u, std::bit_cast<std::uint32_t>(0.4f));
+    }
     if (ctx.gpr[2] == 0u) {
     ctx.fpr[12] = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[29] + static_cast<std::uint32_t>(192)));
         goto L_0885B724;
