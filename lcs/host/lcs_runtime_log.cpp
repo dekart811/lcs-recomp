@@ -1,5 +1,4 @@
 #include "lcs_runtime_log.hpp"
-#include "lcs_render_config.hpp"
 
 #include <chrono>
 #include <ctime>
@@ -42,30 +41,6 @@ std::string timestamp_now() {
     return out.str();
 }
 
-}
-
-void runtime_log_initialize(const LcsConfiguration &configuration) {
-    RuntimeLogState &s = state();
-    std::lock_guard<std::mutex> guard(s.mutex);
-    s.enabled = configuration.diagnostics.log_to_file;
-    s.flush_every_line = configuration.diagnostics.flush_every_line;
-    s.path.clear();
-    if (s.file.is_open()) s.file.close();
-    if (!s.enabled) return;
-    std::filesystem::path file_name = configuration.diagnostics.log_file;
-    if (file_name.empty()) file_name = "LCSNative.log";
-    s.path = configuration.executable_directory / file_name;
-    s.file.open(s.path, std::ios::out | std::ios::trunc);
-    if (!s.file) {
-        s.enabled = false;
-        s.path.clear();
-        return;
-    }
-    s.file << "LCSNative runtime log\n";
-    s.file << "stage=45.9-async-ge-cross-unit-hot-register-cache\n";
-    s.file << "config=" << configuration.source_path.string() << '\n';
-    s.file << "started=" << timestamp_now() << "\n\n";
-    if (s.flush_every_line) s.file.flush();
 }
 
 void runtime_log_shutdown() noexcept {

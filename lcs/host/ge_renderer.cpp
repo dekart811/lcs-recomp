@@ -110,54 +110,6 @@ inline void divide4_same_denominator(float n0, float n1, float n2, float n3,
 #endif
 }
 
-bool ge_phase_diag_enabled() noexcept {
-    static const bool enabled = std::getenv("PSPRECOMP_GE_PHASE_DIAG") != nullptr;
-    return enabled;
-}
-bool speed_list_split_enabled() noexcept {
-    static const bool enabled = std::getenv("PSPRECOMP_REALTIME_SPEED_DIAG") != nullptr;
-    return enabled;
-}
-std::uint64_t g_ge_pixel_ns{};
-std::uint64_t g_ge_triangle_count{};
-std::uint64_t g_ge_draw_setup_ns{};
-std::uint64_t g_ge_texture_upload_ns{};
-std::uint64_t g_ge_vertex_decode_ns{};
-std::uint64_t g_ge_gpu_stage_ns{};
-std::uint64_t g_ge_triangle_prep_ns{};
-std::uint64_t g_ge_gpu_accumulate_ns{};
-std::uint64_t g_ge_primitive_count{};
-std::uint64_t g_ge_vertex_count{};
-std::atomic<std::uint64_t> g_live_vertex_ns{};
-std::atomic<std::uint64_t> g_live_tex_hash_ns{};
-std::atomic<std::uint64_t> g_live_tex_decode_ns{};
-std::atomic<std::uint64_t> g_live_vertex_copy_ns{};
-std::atomic<std::uint64_t> g_live_vertex_reused{};
-std::atomic<std::uint64_t> g_live_vertex_decoded{};
-
-struct PhaseTimer {
-    std::uint64_t *sink;
-    // Speed-line sample. Null unless this phase is one of the four list splits.
-    std::atomic<std::uint64_t> *live;
-    std::chrono::steady_clock::time_point entry;
-    explicit PhaseTimer(std::uint64_t &target,
-                        std::atomic<std::uint64_t> *live_counter = nullptr) noexcept
-        : sink(ge_phase_diag_enabled() ? &target : nullptr),
-          live(speed_list_split_enabled() ? live_counter : nullptr),
-          entry(sink != nullptr || live != nullptr ? std::chrono::steady_clock::now()
-                                                    : std::chrono::steady_clock::time_point{}) {}
-    ~PhaseTimer() {
-        if (sink == nullptr && live == nullptr) return;
-        const auto ns = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - entry).count());
-        if (sink != nullptr) *sink += ns;
-        if (live != nullptr) live->fetch_add(ns, std::memory_order_relaxed);
-    }
-    PhaseTimer(const PhaseTimer &) = delete;
-    PhaseTimer &operator=(const PhaseTimer &) = delete;
-};
-
 bool legacy_vertex_staging_enabled() noexcept {
     static const bool enabled = [] {
         const char *text = std::getenv("PSPRECOMP_GE_GPU_STAGE_VERTICES");
@@ -233,16 +185,6 @@ inline void raster_cpu_relax() noexcept {
     std::atomic_signal_fence(std::memory_order_seq_cst);
 #endif
 }
-
-struct PixelLoopTimer {
-    std::chrono::steady_clock::time_point entry;
-    PixelLoopTimer() : entry(std::chrono::steady_clock::now()) {}
-    ~PixelLoopTimer() {
-        g_ge_pixel_ns += static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - entry).count());
-    }
-};
 
 class RowWorkerPool {
 public:
@@ -491,61 +433,6 @@ struct Vertex {
     float inv_w{1.0f};
     float fog_factor{1.0f};
 };
-
-thread_local bool g_collect_ge_render_stats = true;
-
-struct GeRenderStatsCollectionScope {
-    bool previous{};
-    explicit GeRenderStatsCollectionScope(bool enabled) noexcept
-        : previous(g_collect_ge_render_stats) { g_collect_ge_render_stats = enabled; }
-    ~GeRenderStatsCollectionScope() { g_collect_ge_render_stats = previous; }
-};
-
-void record_clip_vertex(GeRenderStats &stats, const Vertex &vertex) noexcept {
-    if (!g_collect_ge_render_stats) return;
-    ++stats.decoded_vertices;
-    const bool finite = std::isfinite(vertex.x) && std::isfinite(vertex.y) &&
-                        std::isfinite(vertex.z) && std::isfinite(vertex.w);
-    if (!finite) {
-        ++stats.nonfinite_clip_vertices;
-        return;
-    }
-    if (!stats.has_clip_bounds) {
-        stats.has_clip_bounds = true;
-        stats.clip_min_x = stats.clip_max_x = vertex.x;
-        stats.clip_min_y = stats.clip_max_y = vertex.y;
-        stats.clip_min_z = stats.clip_max_z = vertex.z;
-        stats.clip_min_w = stats.clip_max_w = vertex.w;
-        stats.min_abs_w = std::fabs(vertex.w);
-        return;
-    }
-    stats.clip_min_x = std::min(stats.clip_min_x, vertex.x);
-    stats.clip_min_y = std::min(stats.clip_min_y, vertex.y);
-    stats.clip_min_z = std::min(stats.clip_min_z, vertex.z);
-    stats.clip_min_w = std::min(stats.clip_min_w, vertex.w);
-    stats.clip_max_x = std::max(stats.clip_max_x, vertex.x);
-    stats.clip_max_y = std::max(stats.clip_max_y, vertex.y);
-    stats.clip_max_z = std::max(stats.clip_max_z, vertex.z);
-    stats.clip_max_w = std::max(stats.clip_max_w, vertex.w);
-    stats.min_abs_w = std::min(stats.min_abs_w, std::fabs(vertex.w));
-}
-
-void record_screen_vertex(GeRenderStats &stats, const Vertex &vertex) noexcept {
-    if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y)) return;
-    ++stats.screen_vertices;
-    const float max_abs = std::max(std::fabs(vertex.x), std::fabs(vertex.y));
-    stats.max_abs_screen_coordinate = std::max(stats.max_abs_screen_coordinate, max_abs);
-    if (!stats.has_screen_bounds) {
-        stats.has_screen_bounds = true;
-        stats.screen_min_x = stats.screen_max_x = vertex.x;
-        stats.screen_min_y = stats.screen_max_y = vertex.y;
-        return;
-    }
-    stats.screen_min_x = std::min(stats.screen_min_x, vertex.x);
-    stats.screen_min_y = std::min(stats.screen_min_y, vertex.y);
-    stats.screen_max_x = std::max(stats.screen_max_x, vertex.x);
-    stats.screen_max_y = std::max(stats.screen_max_y, vertex.y);
-}
 
 struct VertexLayout {
     std::uint32_t type{};
@@ -2870,9 +2757,7 @@ bool depth_test_and_write(psprecomp::GuestMemory &memory, const FragmentSetup &s
 void rasterize_rectangle(psprecomp::GuestMemory &memory,
                          const std::array<std::uint32_t, 256> &commands,
                          const FragmentSetup &setup,
-                         const Vertex &a, const Vertex &b, GeRenderStats &stats) {
-    record_screen_vertex(stats, a);
-    record_screen_vertex(stats, b);
+                         const Vertex &a, const Vertex &b) {
     if (!setup.valid) return;
     if (software_raster_skipped(commands)) return;
     const std::uint32_t framebuffer_format = setup.framebuffer_format;
@@ -2904,7 +2789,6 @@ void rasterize_rectangle(psprecomp::GuestMemory &memory,
     const std::int32_t rectangle_width = x1 - x0 + 1;
     const std::int64_t covered = static_cast<std::int64_t>(rectangle_width) *
                                  static_cast<std::int64_t>(y1 - y0 + 1);
-    const bool phase_diag = ge_phase_diag_enabled();
     RowWorkerPool &pool = RowWorkerPool::instance();
 
     const bool constant_depth = a.z == b.z;
@@ -2922,8 +2806,7 @@ void rasterize_rectangle(psprecomp::GuestMemory &memory,
             std::clamp(static_cast<float>(a.z), 0.0f, 65535.0f));
         const std::uint32_t packed32 = pack32(b.color);
         const std::uint16_t packed16 = pack16(b.color, framebuffer_format);
-        const auto clear_rows = [&](std::int32_t row_first, std::int32_t row_last,
-                                    GeRenderStats &row_stats) {
+        const auto clear_rows = [&](std::int32_t row_first, std::int32_t row_last) {
             for (std::int32_t y = row_first; y <= row_last; ++y) {
                 if (full_color_clear) {
                     std::uint8_t *row = setup.color_pixels +
@@ -2944,40 +2827,22 @@ void rasterize_rectangle(psprecomp::GuestMemory &memory,
                     std::fill_n(reinterpret_cast<std::uint16_t *>(depth_row),
                                 static_cast<std::size_t>(rectangle_width), depth_value);
                 }
-                row_stats.pixels_tested += static_cast<std::uint64_t>(rectangle_width);
-                row_stats.pixels_written += static_cast<std::uint64_t>(rectangle_width);
             }
         };
-        const auto invoke_clear = [&] {
-            if (covered < parallel_pixel_threshold() || pool.worker_count() <= 1u) {
-                clear_rows(y0, y1, stats);
-                return;
-            }
-            const unsigned slots = pool.worker_count();
-            std::array<GeRenderStats, RowWorkerPool::kMaxThreads> partial{};
-            pool.run(y0, y1, [&](unsigned index, std::int32_t first, std::int32_t last) {
-                clear_rows(first, last, partial[index]);
-            });
-            for (unsigned index = 0u; index < slots; ++index) {
-                stats.pixels_tested += partial[index].pixels_tested;
-                stats.pixels_written += partial[index].pixels_written;
-            }
-        };
-        if (phase_diag) {
-            PixelLoopTimer timer;
-            invoke_clear();
-        } else {
-            invoke_clear();
+        if (covered < parallel_pixel_threshold() || pool.worker_count() <= 1u) {
+            clear_rows(y0, y1);
+            return;
         }
+        pool.run(y0, y1, [&](unsigned, std::int32_t first, std::int32_t last) {
+            clear_rows(first, last);
+        });
         return;
     }
 
-    const auto rasterize_rect_rows = [&](std::int32_t row_first, std::int32_t row_last,
-                                         GeRenderStats &row_stats) {
+    const auto rasterize_rect_rows = [&](std::int32_t row_first, std::int32_t row_last) {
     for (std::int32_t y = row_first; y <= row_last; ++y) {
         const float ty = dy == 0.0f ? 0.0f : ((static_cast<float>(y) + 0.5f - a.y) / dy);
         for (std::int32_t x = x0; x <= x1; ++x) {
-            ++row_stats.pixels_tested;
             const float tx = dx == 0.0f ? 0.0f : ((static_cast<float>(x) + 0.5f - a.x) / dx);
             const float interpolation = std::clamp((tx + ty) * 0.5f, 0.0f, 1.0f);
             Color source = b.color;
@@ -3009,39 +2874,17 @@ void rasterize_rectangle(psprecomp::GuestMemory &memory,
             }
             if (pixel != nullptr) write_color_raw(pixel, framebuffer_format, source, clear_mode ? 0u : write_mask);
             else write_color(memory, pixel_address, framebuffer_format, source, clear_mode ? 0u : write_mask);
-            ++row_stats.pixels_written;
         }
     }
     };
 
     if (covered < parallel_pixel_threshold() || pool.worker_count() <= 1u) {
-        if (phase_diag) {
-            PixelLoopTimer timer;
-            rasterize_rect_rows(y0, y1, stats);
-        } else {
-            rasterize_rect_rows(y0, y1, stats);
-        }
+        rasterize_rect_rows(y0, y1);
         return;
     }
-
-    const unsigned slots = pool.worker_count();
-    std::array<GeRenderStats, RowWorkerPool::kMaxThreads> partial{};
-    const auto run_parallel = [&] {
-        pool.run(y0, y1, [&](unsigned index, std::int32_t row_first, std::int32_t row_last) {
-            rasterize_rect_rows(row_first, row_last, partial[index]);
-        });
-    };
-    if (phase_diag) {
-        PixelLoopTimer timer;
-        run_parallel();
-    } else {
-        run_parallel();
-    }
-    for (unsigned index = 0u; index < slots; ++index) {
-        const GeRenderStats &item = partial[index];
-        stats.pixels_tested += item.pixels_tested;
-        stats.pixels_written += item.pixels_written;
-    }
+    pool.run(y0, y1, [&](unsigned, std::int32_t row_first, std::int32_t row_last) {
+        rasterize_rect_rows(row_first, row_last);
+    });
 }
 
 float clip_distance(const Vertex &vertex, std::uint32_t plane) noexcept {
@@ -3161,7 +3004,7 @@ bool depth_precedes_shading(const FragmentSetup &setup) noexcept {
 }
 
 bool fragment_depth_prepass(psprecomp::GuestMemory &memory, const FragmentSetup &setup,
-                            std::int32_t x, std::int32_t y, float zf, GeRenderStats &stats) {
+                            std::int32_t x, std::int32_t y, float zf) {
     if (!setup.valid || x < 0 || y < 0 ||
         x >= static_cast<std::int32_t>(setup.framebuffer_stride)) {
         return false;
@@ -3170,7 +3013,6 @@ bool fragment_depth_prepass(psprecomp::GuestMemory &memory, const FragmentSetup 
         y < setup.scissor_y0 || y > setup.scissor_y1) {
         return false;
     }
-    ++stats.pixels_tested;
     const std::uint16_t z = static_cast<std::uint16_t>(std::clamp(zf, 0.0f, 65535.0f));
     return depth_test_and_write(memory, setup, x, y, z, setup.clear_mode && setup.clear_depth);
 }
@@ -3179,7 +3021,7 @@ bool write_fragment(psprecomp::GuestMemory &memory,
                     const std::array<std::uint32_t, 256> &commands,
                     const FragmentSetup &setup,
                     std::int32_t x, std::int32_t y, float zf, float u, float v,
-                    Color source, GeRenderStats &stats, bool depth_resolved = false) {
+                    Color source, bool depth_resolved = false) {
     if (!depth_resolved) {
         if (!setup.valid || x < 0 || y < 0 ||
             x >= static_cast<std::int32_t>(setup.framebuffer_stride)) {
@@ -3189,7 +3031,6 @@ bool write_fragment(psprecomp::GuestMemory &memory,
             y < setup.scissor_y0 || y > setup.scissor_y1) {
             return false;
         }
-        ++stats.pixels_tested;
     }
     const std::uint16_t z = static_cast<std::uint16_t>(std::clamp(zf, 0.0f, 65535.0f));
 
@@ -3226,7 +3067,6 @@ bool write_fragment(psprecomp::GuestMemory &memory,
     const std::uint32_t mask = setup.clear_mode ? 0u : setup.write_mask;
     if (pixel != nullptr) write_color_raw(pixel, setup.framebuffer_format, source, mask);
     else write_color(memory, pixel_address, setup.framebuffer_format, source, mask);
-    ++stats.pixels_written;
     return true;
 }
 
@@ -3291,38 +3131,6 @@ std::uint32_t pack_gpu_fog_control(const GeGpuDrawDescriptor &draw) noexcept {
            (static_cast<std::uint32_t>(draw.fog_enabled ? 0xFFu : 0u) << 24u);
 }
 
-Color gpu_draw_debug_color(const GeGpuDrawDescriptor &draw) noexcept {
-    std::uint32_t hash = draw.texture_address ^ (draw.texture_address >> 11u) ^
-                         (draw.texture_buffer_width * 0x9E3779B9u) ^
-                         (draw.texture_format * 0x85EBCA6Bu) ^
-                         (draw.primitive * 0xC2B2AE35u) ^ draw.vertex_count;
-    hash ^= hash >> 16u;
-    hash *= 0x7FEB352Du;
-    hash ^= hash >> 15u;
-    return {
-        static_cast<std::uint8_t>(48u + (hash & 0xCFu)),
-        static_cast<std::uint8_t>(48u + ((hash >> 8u) & 0xCFu)),
-        static_cast<std::uint8_t>(48u + ((hash >> 16u) & 0xCFu)),
-        255u,
-    };
-}
-
-bool gpu_geometry_debug_colors_enabled() noexcept {
-    static const bool enabled = [] {
-        const char *value = std::getenv("PSPRECOMP_GE_GPU_GEOMETRY_DEBUG_COLORS");
-        return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
-    }();
-    return enabled;
-}
-
-bool gpu_force_white_vertex_colors_enabled() noexcept {
-    static const bool enabled = [] {
-        const char *value = std::getenv("PSPRECOMP_GE_GPU_FORCE_WHITE_VERTEX");
-        return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
-    }();
-    return enabled;
-}
-
 Color gpu_texture_debug_color(const GeGpuDrawDescriptor &draw, Color lighting) noexcept {
     std::uint32_t hash = draw.texture_address ^ (draw.texture_address >> 11u) ^
                          (draw.texture_buffer_width * 0x9E3779B9u) ^
@@ -3376,17 +3184,10 @@ void accumulate_gpu_prepared_triangles(
             Color ca = triangle.flat_shading ? triangle.provoking_color : triangle.a.color;
             Color cb = triangle.flat_shading ? triangle.provoking_color : triangle.b.color;
             Color cc = triangle.flat_shading ? triangle.provoking_color : triangle.c.color;
-            if (gpu_force_white_vertex_colors_enabled()) {
-                ca = cb = cc = Color{255u, 255u, 255u, 255u};
-            } else if (gpu_geometry_debug_colors_enabled()) {
-                ca = cb = cc = gpu_draw_debug_color(effective_draw);
-            } else if (effective_draw.texture_enabled) {
-                if (sampled_texture_ready) {
-                } else {
-                    ca = gpu_texture_debug_color(effective_draw, ca);
-                    cb = gpu_texture_debug_color(effective_draw, cb);
-                    cc = gpu_texture_debug_color(effective_draw, cc);
-                }
+            if (effective_draw.texture_enabled && !sampled_texture_ready) {
+                ca = gpu_texture_debug_color(effective_draw, ca);
+                cb = gpu_texture_debug_color(effective_draw, cb);
+                cc = gpu_texture_debug_color(effective_draw, cc);
             }
             vertices.push_back({triangle.a.x, triangle.a.y, triangle.a.z, triangle.a.w,
                                 pack_gpu_color(ca), triangle.a.u, triangle.a.v,
@@ -3414,11 +3215,7 @@ void accumulate_gpu_rectangle(const GeGpuDrawDescriptor &draw,
         ge_gpu_backend_texture_available(effective_draw);
 
     Color color = b.color;
-    if (!effective_draw.clear_mode && gpu_force_white_vertex_colors_enabled()) {
-        color = Color{255u, 255u, 255u, 255u};
-    } else if (!effective_draw.clear_mode && gpu_geometry_debug_colors_enabled()) {
-        color = gpu_draw_debug_color(effective_draw);
-    } else if (effective_draw.texture_enabled && !sampled_texture_ready) {
+    if (effective_draw.texture_enabled && !sampled_texture_ready) {
         color = gpu_texture_debug_color(effective_draw, color);
     }
 
@@ -3447,11 +3244,8 @@ void accumulate_gpu_rectangle(const GeGpuDrawDescriptor &draw,
 bool prepare_screen_triangle(const std::array<std::uint32_t, 256> &commands,
                              const FragmentSetup &setup,
                              const Vertex &a, const Vertex &b, const Vertex &c,
-                             Color provoking_color, GeRenderStats &stats,
+                             Color provoking_color,
                              PreparedScreenTriangle &prepared) {
-    record_screen_vertex(stats, a);
-    record_screen_vertex(stats, b);
-    record_screen_vertex(stats, c);
     const float area = edge_function(a, b, c.x, c.y);
     if (!std::isfinite(area) || std::fabs(area) < 1.0e-8f) return false;
 
@@ -3459,13 +3253,9 @@ bool prepare_screen_triangle(const std::array<std::uint32_t, 256> &commands,
     if (!clear_mode && (data24(commands[0x1Du]) & 1u) != 0u) {
         const bool counter_clockwise = area < 0.0f;
         const bool accept_counter_clockwise = (data24(commands[0x9Bu]) & 1u) != 0u;
-        if (counter_clockwise != accept_counter_clockwise) {
-            if (g_collect_ge_render_stats) ++stats.culled_triangles;
-            return false;
-        }
+        if (counter_clockwise != accept_counter_clockwise) return false;
     }
     const bool flat_shading = !clear_mode && (data24(commands[0x50u]) & 1u) == 0u;
-    if (flat_shading && g_collect_ge_render_stats) ++stats.flat_shaded_primitives;
 
     if (!setup.valid) return false;
     const std::int32_t min_x = std::max(setup.scissor_x0,
@@ -3502,24 +3292,17 @@ bool prepare_screen_triangle(const std::array<std::uint32_t, 256> &commands,
 bool prepare_gpu_only_screen_triangle(const std::array<std::uint32_t, 256> &commands,
                                       const FragmentSetup &setup,
                                       const Vertex &a, const Vertex &b, const Vertex &c,
-                                      Color provoking_color, GeRenderStats &stats,
+                                      Color provoking_color,
                                       PreparedScreenTriangle &prepared) {
-    record_screen_vertex(stats, a);
-    record_screen_vertex(stats, b);
-    record_screen_vertex(stats, c);
     const float area = edge_function(a, b, c.x, c.y);
     if (!std::isfinite(area) || std::fabs(area) < 1.0e-8f || !setup.valid) return false;
     const bool clear_mode = (data24(commands[0xD3u]) & 1u) != 0u;
     if (!clear_mode && (data24(commands[0x1Du]) & 1u) != 0u) {
         const bool counter_clockwise = area < 0.0f;
         const bool accept_counter_clockwise = (data24(commands[0x9Bu]) & 1u) != 0u;
-        if (counter_clockwise != accept_counter_clockwise) {
-            if (g_collect_ge_render_stats) ++stats.culled_triangles;
-            return false;
-        }
+        if (counter_clockwise != accept_counter_clockwise) return false;
     }
     const bool flat_shading = !clear_mode && (data24(commands[0x50u]) & 1u) == 0u;
-    if (flat_shading && g_collect_ge_render_stats) ++stats.flat_shaded_primitives;
     prepared.a = a;
     prepared.b = b;
     prepared.c = c;
@@ -3533,16 +3316,15 @@ void append_prepared_triangles(const std::array<std::uint32_t, 256> &commands,
                                const FragmentSetup &setup,
                                const Vertex &a, const Vertex &b, const Vertex &c,
                                const Vertex &provoking, bool through,
-                               GeRenderStats &stats,
                                std::vector<PreparedScreenTriangle> &prepared,
                                bool gpu_only = false) {
     const auto emplace_prepared = [&](const Vertex &va, const Vertex &vb, const Vertex &vc) {
         prepared.emplace_back();
         const bool kept = gpu_only
             ? prepare_gpu_only_screen_triangle(commands, setup, va, vb, vc,
-                                               provoking.color, stats, prepared.back())
+                                               provoking.color, prepared.back())
             : prepare_screen_triangle(commands, setup, va, vb, vc, provoking.color,
-                                      stats, prepared.back());
+                                      prepared.back());
         if (!kept) prepared.pop_back();
     };
 
@@ -3566,8 +3348,7 @@ void rasterize_prepared_triangle_rows(psprecomp::GuestMemory &memory,
                                       const std::array<std::uint32_t, 256> &commands,
                                       const FragmentSetup &setup,
                                       const PreparedScreenTriangle &triangle,
-                                      std::int32_t row_first, std::int32_t row_last,
-                                      GeRenderStats &row_stats) {
+                                      std::int32_t row_first, std::int32_t row_last) {
     row_first = std::max(row_first, triangle.min_y);
     row_last = std::min(row_last, triangle.max_y);
     if (row_first > row_last) return;
@@ -3622,7 +3403,7 @@ void rasterize_prepared_triangle_rows(psprecomp::GuestMemory &memory,
             }
             const float z = l0 * a.z + l1 * b.z + l2 * c.z;
             if (triangle.early_depth &&
-                !fragment_depth_prepass(memory, setup, x, y, z, row_stats)) continue;
+                !fragment_depth_prepass(memory, setup, x, y, z)) continue;
             float u = 0.0f;
             float v = 0.0f;
             if (triangle.texture_enabled) {
@@ -3634,7 +3415,7 @@ void rasterize_prepared_triangle_rows(psprecomp::GuestMemory &memory,
                 ? triangle.provoking_color
                 : perspective_color(a, b, c, l0, l1, l2, denominator);
             write_fragment(memory, commands, setup, x, y, z, u, v, color,
-                           row_stats, triangle.early_depth);
+                           triangle.early_depth);
         }
     }
 }
@@ -3651,90 +3432,27 @@ std::vector<PreparedScreenTriangle> g_deferred_triangles;
 std::int32_t g_deferred_min_y = 0;
 std::int32_t g_deferred_max_y = 0;
 
-bool deferred_rasterization_enabled() noexcept {
-    static const bool enabled = std::getenv("LCS_GE_NO_DEFER") == nullptr;
-    return enabled;
-}
-
-void rasterize_prepared_triangles(psprecomp::GuestMemory &memory,
+// Queued until flush_deferred_batches rasterizes every batch in one pass.
+void rasterize_prepared_triangles(psprecomp::GuestMemory &,
                                   const std::array<std::uint32_t, 256> &commands,
                                   const FragmentSetup &setup,
-                                  const std::vector<PreparedScreenTriangle> &triangles,
-                                  GeRenderStats &stats) {
+                                  const std::vector<PreparedScreenTriangle> &triangles) {
     if (triangles.empty()) return;
     if (software_raster_skipped(commands)) return;
 
-    if (deferred_rasterization_enabled()) {
-        if (ge_phase_diag_enabled()) g_ge_triangle_count += triangles.size();
-        if (g_deferred_triangles.empty()) {
-            g_deferred_min_y = triangles.front().min_y;
-            g_deferred_max_y = triangles.front().max_y;
-        }
-        DeferredRasterBatch &batch = g_deferred_batches.emplace_back();
-        batch.commands = commands;
-        batch.setup = setup;
-        batch.first = g_deferred_triangles.size();
-        batch.count = triangles.size();
-        for (const PreparedScreenTriangle &triangle : triangles) {
-            g_deferred_min_y = std::min(g_deferred_min_y, triangle.min_y);
-            g_deferred_max_y = std::max(g_deferred_max_y, triangle.max_y);
-            g_deferred_triangles.push_back(triangle);
-        }
-        return;
+    if (g_deferred_triangles.empty()) {
+        g_deferred_min_y = triangles.front().min_y;
+        g_deferred_max_y = triangles.front().max_y;
     }
-
-    std::int32_t min_y = triangles.front().min_y;
-    std::int32_t max_y = triangles.front().max_y;
-    std::int64_t covered = 0;
+    DeferredRasterBatch &batch = g_deferred_batches.emplace_back();
+    batch.commands = commands;
+    batch.setup = setup;
+    batch.first = g_deferred_triangles.size();
+    batch.count = triangles.size();
     for (const PreparedScreenTriangle &triangle : triangles) {
-        min_y = std::min(min_y, triangle.min_y);
-        max_y = std::max(max_y, triangle.max_y);
-        covered += static_cast<std::int64_t>(triangle.max_x - triangle.min_x + 1) *
-                   static_cast<std::int64_t>(triangle.max_y - triangle.min_y + 1);
-    }
-
-    const bool phase_diag = ge_phase_diag_enabled();
-    if (phase_diag) g_ge_triangle_count += triangles.size();
-
-    const auto rasterize_serial = [&](GeRenderStats &target) {
-        for (const PreparedScreenTriangle &triangle : triangles)
-            rasterize_prepared_triangle_rows(memory, commands, setup, triangle,
-                                             triangle.min_y, triangle.max_y, target);
-    };
-
-    RowWorkerPool &pool = RowWorkerPool::instance();
-    if (covered < parallel_pixel_threshold() || pool.worker_count() <= 1u ||
-        min_y >= max_y) {
-        if (phase_diag) {
-            PixelLoopTimer timer;
-            rasterize_serial(stats);
-        } else {
-            rasterize_serial(stats);
-        }
-        return;
-    }
-
-    const unsigned slots = pool.worker_count();
-    std::array<GeRenderStats, RowWorkerPool::kMaxThreads> partial{};
-    const auto run_parallel = [&] {
-        pool.run(min_y, max_y, [&](unsigned index,
-                                   std::int32_t row_first, std::int32_t row_last) {
-            for (const PreparedScreenTriangle &triangle : triangles) {
-                if (row_last < triangle.min_y || row_first > triangle.max_y) continue;
-                rasterize_prepared_triangle_rows(memory, commands, setup, triangle,
-                                                 row_first, row_last, partial[index]);
-            }
-        });
-    };
-    if (phase_diag) {
-        PixelLoopTimer timer;
-        run_parallel();
-    } else {
-        run_parallel();
-    }
-    for (unsigned index = 0u; index < slots; ++index) {
-        stats.pixels_tested += partial[index].pixels_tested;
-        stats.pixels_written += partial[index].pixels_written;
+        g_deferred_min_y = std::min(g_deferred_min_y, triangle.min_y);
+        g_deferred_max_y = std::max(g_deferred_max_y, triangle.max_y);
+        g_deferred_triangles.push_back(triangle);
     }
 }
 
@@ -3748,37 +3466,24 @@ void flush_deferred_batches(psprecomp::GuestMemory &memory) {
     const std::int32_t min_y = g_deferred_min_y;
     const std::int32_t max_y = g_deferred_max_y;
 
-    const auto rasterize_band = [&](std::int32_t row_first, std::int32_t row_last,
-                                    GeRenderStats &target) {
+    const auto rasterize_band = [&](std::int32_t row_first, std::int32_t row_last) {
         for (const DeferredRasterBatch &batch : g_deferred_batches) {
             for (std::size_t index = 0u; index < batch.count; ++index) {
                 const PreparedScreenTriangle &triangle = g_deferred_triangles[batch.first + index];
                 if (row_last < triangle.min_y || row_first > triangle.max_y) continue;
                 rasterize_prepared_triangle_rows(memory, batch.commands, batch.setup, triangle,
                                                  std::max(row_first, triangle.min_y),
-                                                 std::min(row_last, triangle.max_y), target);
+                                                 std::min(row_last, triangle.max_y));
             }
         }
     };
 
-    const auto run = [&] {
-        if (pool.worker_count() <= 1u || min_y >= max_y) {
-            GeRenderStats discarded{};
-            rasterize_band(min_y, max_y, discarded);
-            return;
-        }
-        std::array<GeRenderStats, RowWorkerPool::kMaxThreads> partial{};
-        pool.run(min_y, max_y, [&](unsigned index, std::int32_t row_first,
-                                   std::int32_t row_last) {
-            rasterize_band(row_first, row_last, partial[index]);
-        });
-    };
-
-    if (ge_phase_diag_enabled()) {
-        PixelLoopTimer timer;
-        run();
+    if (pool.worker_count() <= 1u || min_y >= max_y) {
+        rasterize_band(min_y, max_y);
     } else {
-        run();
+        pool.run(min_y, max_y, [&](unsigned, std::int32_t row_first, std::int32_t row_last) {
+            rasterize_band(row_first, row_last);
+        });
     }
 
     g_deferred_batches.clear();
@@ -3789,50 +3494,45 @@ void rasterize_triangle(psprecomp::GuestMemory &memory,
                         const std::array<std::uint32_t, 256> &commands,
                         const FragmentSetup &setup,
                         const Vertex &a, const Vertex &b, const Vertex &c,
-                        const Vertex &provoking, bool through, GeRenderStats &stats) {
+                        const Vertex &provoking, bool through) {
     std::vector<PreparedScreenTriangle> triangles;
     triangles.reserve(4u);
-    append_prepared_triangles(commands, setup, a, b, c, provoking, through, stats, triangles);
-    rasterize_prepared_triangles(memory, commands, setup, triangles, stats);
+    append_prepared_triangles(commands, setup, a, b, c, provoking, through, triangles);
+    rasterize_prepared_triangles(memory, commands, setup, triangles);
 }
 
 void rasterize_point(psprecomp::GuestMemory &memory,
                      const std::array<std::uint32_t, 256> &commands,
                      const FragmentSetup &setup,
-                     Vertex vertex, bool through, GeRenderStats &stats) {
+                     Vertex vertex, bool through) {
     if (!through) {
         const bool depth_clip_enabled = (data24(commands[0x1Cu]) & 1u) != 0u;
         if (!point_inside_clip(vertex, depth_clip_enabled) || !viewport_transform(vertex, commands)) return;
     }
-    record_screen_vertex(stats, vertex);
     const bool texture_enabled = (data24(commands[0x1Eu]) & 1u) != 0u && (data24(commands[0xD3u]) & 1u) == 0u;
     if (texture_enabled && (!std::isfinite(vertex.q) || std::fabs(vertex.q) < 1.0e-20f)) return;
     const float q = texture_enabled ? vertex.q : 1.0f;
     write_fragment(memory, commands, setup, static_cast<std::int32_t>(std::floor(vertex.x)),
                    static_cast<std::int32_t>(std::floor(vertex.y)), vertex.z,
-                   vertex.u / q, vertex.v / q, vertex.color, stats);
+                   vertex.u / q, vertex.v / q, vertex.color);
 }
 
 void rasterize_line(psprecomp::GuestMemory &memory,
                     const std::array<std::uint32_t, 256> &commands,
                     const FragmentSetup &setup,
-                    Vertex a, Vertex b, bool through, GeRenderStats &stats) {
+                    Vertex a, Vertex b, bool through) {
     if (!through) {
         const bool depth_clip_enabled = (data24(commands[0x1Cu]) & 1u) != 0u;
         if (!point_inside_clip(a, depth_clip_enabled) || !point_inside_clip(b, depth_clip_enabled) ||
             !viewport_transform(a, commands) || !viewport_transform(b, commands)) return;
     }
-    record_screen_vertex(stats, a);
-    record_screen_vertex(stats, b);
     const float dx = b.x - a.x;
     const float dy = b.y - a.y;
     const std::int32_t steps = static_cast<std::int32_t>(std::ceil(std::max(std::fabs(dx), std::fabs(dy))));
     if (steps <= 0) {
-        rasterize_point(memory, commands, setup, a, true, stats);
+        rasterize_point(memory, commands, setup, a, true);
         return;
     }
-    if ((data24(commands[0xD3u]) & 1u) == 0u && (data24(commands[0x50u]) & 1u) == 0u)
-        ++stats.flat_shaded_primitives;
     const FragmentSetup &line_setup = setup;
     const bool line_texture_enabled =
         line_setup.texture_enabled && (data24(commands[0xD3u]) & 1u) == 0u;
@@ -3853,7 +3553,7 @@ void rasterize_line(psprecomp::GuestMemory &memory,
         write_fragment(memory, commands, line_setup,
                        static_cast<std::int32_t>(std::floor(a.x + dx * t)),
                        static_cast<std::int32_t>(std::floor(a.y + dy * t)),
-                       a.z + (b.z - a.z) * t, u, v, color, stats);
+                       a.z + (b.z - a.z) * t, u, v, color);
     }
 }
 
@@ -3910,27 +3610,6 @@ std::uint32_t index_size(std::uint32_t index_type) noexcept {
 struct HudBox {
     float x0, y0, x1, y1;
 };
-
-bool hud_diag_enabled() noexcept {
-    static const bool enabled = std::getenv("LCS_HUD_DIAG") != nullptr;
-    return enabled;
-}
-
-void log_hud_group(std::uint32_t primitive, const HudBox &box, float anchor_x, float anchor_y,
-                   float width, float height) {
-    static std::mutex mutex;
-    static std::vector<std::uint64_t> seen;
-    const auto q = [](float value) {
-        return static_cast<std::uint64_t>(std::clamp(value, -1024.0f, 1023.0f) + 1024.0f) & 0x7FFu;
-    };
-    const std::uint64_t key = q(box.x0) | (q(box.y0) << 11u) | (q(box.x1) << 22u) |
-                              (q(box.y1) << 33u) | (static_cast<std::uint64_t>(primitive) << 44u);
-    const std::lock_guard<std::mutex> lock(mutex);
-    if (seen.size() >= 2000u || std::find(seen.begin(), seen.end(), key) != seen.end()) return;
-    seen.push_back(key);
-    std::fprintf(stderr, "[hud] prim=%u box=(%.1f,%.1f)-(%.1f,%.1f) anchor=(%.1f,%.1f) extent=%.1fx%.1f\n",
-                 primitive, box.x0, box.y0, box.x1, box.y1, anchor_x, anchor_y, width, height);
-}
 
 void scale_hud_vertices(std::vector<Vertex> &vertices, std::uint32_t primitive,
                         float width, float height, float scale, float full_fraction,
@@ -4015,8 +3694,6 @@ void scale_hud_vertices(std::vector<Vertex> &vertices, std::uint32_t primitive,
         }
         const float anchor_x = anchor(group.x0, group.x1, width);
         const float anchor_y = anchor(group.y0, group.y1, height);
-        if (hud_diag_enabled() && find(static_cast<std::uint32_t>(u)) == u)
-            log_hud_group(primitive, group, anchor_x, anchor_y, width, height);
         if (!any_scaled) {
             first_x = anchor_x;
             first_y = anchor_y;
@@ -4201,9 +3878,6 @@ bool hw_job_prepare(HwDrawJob &job) {
             if (!ok) return false;
         }
         if (job.probe.valid) job.cache_vertices = job.decoded_vertices;
-        if (speed_list_split_enabled())
-            g_live_vertex_decoded.fetch_add(job.decoded_vertices.size(),
-                                            std::memory_order_relaxed);
     }
 
     const GeGpuDrawDescriptor &draw = job.effective_draw;
@@ -4219,11 +3893,7 @@ bool hw_job_prepare(HwDrawJob &job) {
                     static_cast<std::uint8_t>((vertex.rgba >> 8u) & 0xFFu),
                     static_cast<std::uint8_t>((vertex.rgba >> 16u) & 0xFFu),
                     static_cast<std::uint8_t>((vertex.rgba >> 24u) & 0xFFu)};
-        if (gpu_force_white_vertex_colors_enabled()) {
-            color = Color{255u, 255u, 255u, 255u};
-        } else if (gpu_geometry_debug_colors_enabled()) {
-            color = gpu_draw_debug_color(draw);
-        } else if (draw.texture_enabled && !job.sampled_texture_ready) {
+        if (draw.texture_enabled && !job.sampled_texture_ready) {
             color = gpu_texture_debug_color(draw, color);
         }
         vertex.rgba = pack_gpu_color(color);
@@ -4450,23 +4120,15 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                          std::uint32_t logical_primitive_count,
                          std::uint64_t draw_state_revision,
                          std::uint64_t camera_state_revision,
-                         std::uint64_t lighting_state_revision,
-                         bool collect_diagnostic_stats) {
-    GeRenderStatsCollectionScope stats_scope(collect_diagnostic_stats);
+                         std::uint64_t lighting_state_revision) {
     stats.next_vertex_address = vertex_address;
     stats.next_index_address = index_address;
-    if (collect_diagnostic_stats) ++stats.primitives;
     const std::uint32_t primitive = (primitive_data >> 16u) & 7u;
     const std::uint32_t count = primitive_data & 0xFFFFu;
     if (count == 0u) return true;
 
     VertexLayout layout;
     if (!build_vertex_layout_cached(data24(commands[0x12u]), layout, error)) return false;
-
-    if (ge_phase_diag_enabled()) {
-        ++g_ge_primitive_count;
-        g_ge_vertex_count += count;
-    }
 
     // Draws still in flight were set up against the previous render target; the
     // backend registers new targets while setting up a draw, so let them land first.
@@ -4477,7 +4139,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
     const bool gpu_backend_enabled = ge_gpu_backend_active();
     GeGpuDrawDescriptor gpu_draw{};
     {
-    PhaseTimer draw_setup_timer(g_ge_draw_setup_ns);
     if (gpu_backend_enabled) {
         static thread_local std::uint64_t cached_draw_revision =
             std::numeric_limits<std::uint64_t>::max();
@@ -4570,9 +4231,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
         gpu_draw.vertex_count = count;
 
         // Palette checksum and the once-per-frame texture hash.
-        const bool time_tex_hash = speed_list_split_enabled();
-        const auto tex_hash_started = time_tex_hash ? std::chrono::steady_clock::now()
-                                                    : std::chrono::steady_clock::time_point{};
         gpu_draw.clut_checksum = 0u;
         if (gpu_draw.texture_format >= 4u && gpu_draw.texture_format <= 7u &&
             gpu_draw.clut_address != 0u) {
@@ -4620,12 +4278,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             }
             gpu_draw.texture_content_signature = any_signature ? signature : 0u;
         }
-        if (time_tex_hash) {
-            g_live_tex_hash_ns.fetch_add(static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - tex_hash_started).count()),
-                std::memory_order_relaxed);
-        }
         ge_gpu_backend_record_draw(gpu_draw);
         if (!gpu_draw.clear_mode && primitive >= 3u && primitive <= 6u)
             fps_overlay_observe_draw(gpu_draw, count);
@@ -4656,25 +4308,18 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
     }
 
     if (primitive > 6u || (!layout.through && primitive == 6u)) {
-        if (collect_diagnostic_stats) ++stats.unsupported_primitives;
         advance_stream();
         error.clear();
         return true;
     }
 
-    if (collect_diagnostic_stats && layout.weight_type != 0u) stats.skinned_vertices += count;
-    if (collect_diagnostic_stats && layout.morph_count > 1u) stats.morphed_vertices += count;
-    if (collect_diagnostic_stats && !layout.through && (data24(commands[0x17u]) & 1u) != 0u) stats.lit_vertices += count;
     const std::uint32_t uv_generation = data24(commands[0xC0u]) & 3u;
-    if (!layout.through && (uv_generation == 1u || uv_generation == 2u))
-        if (collect_diagnostic_stats) stats.generated_uv_vertices += count;
 
     const bool gpu_only_triangle_path = gpu_backend_enabled && software_raster_skipped(commands);
 
     if (gpu_backend_enabled && gpu_draw.texture_enabled &&
         ge_gpu_backend_texture_needed(gpu_draw) &&
         !ge_gpu_backend_adopt_shared_texture(gpu_draw)) {
-        PhaseTimer texture_timer(g_ge_texture_upload_ns, &g_live_tex_decode_ns);
         const bool framebuffer_feedback =
             ge_gpu_backend_is_framebuffer_feedback_texture(gpu_draw);
         const std::uint32_t level_count = framebuffer_feedback ? 1u :
@@ -4774,7 +4419,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
         std::uint32_t contiguous_count = indexed ? 0u : count;
 
         {
-        PhaseTimer vertex_timer(g_ge_vertex_decode_ns, &g_live_vertex_ns);
         if (indexed) {
             occurrence_indices.reserve(count);
             const IndexStreamReader draw_indices =
@@ -4865,7 +4509,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
         bool gpu_directional_lighting = false;
         if (fast_0115_raw != nullptr && hw_lighting_on_cpu &&
             fast_0115_world_normal_ptr != nullptr &&
-            !gpu_force_white_vertex_colors_enabled() && !gpu_geometry_debug_colors_enabled() &&
             (!effective_draw.texture_enabled || sampled_texture_ready)) {
             gpu_directional_lighting = prepare_directional_lighting_affine(
                 prepared_lighting, *fast_0115_world_normal_ptr, gpu_light_mul, gpu_light_add);
@@ -4886,7 +4529,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
 
         const bool packed_0115_candidate = packed_0115_gpu_decode_enabled() &&
             fast_0115_raw != nullptr && !cpu_lighting_effective && !flat_shading &&
-            !gpu_force_white_vertex_colors_enabled() && !gpu_geometry_debug_colors_enabled() &&
             (!effective_draw.texture_enabled || sampled_texture_ready);
         if (packed_0115_candidate) {
             const auto occurrence_index = [&](std::size_t i) -> std::uint32_t {
@@ -4925,13 +4567,9 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                     }
                 }
             }
-            const std::size_t packed_triangle_count = primitive == 4u
-                ? (count > 2u ? count - 2u : 0u)
-                : (needs_indices ? triangle_indices.size() / 3u : count / 3u);
             bool accepted = false;
             {
                 hw_draw_queue().drain();
-                PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
                 accepted = ge_gpu_backend_accumulate_hardware_packed_0115(
                     effective_draw, hw,
                     std::span<const std::byte>(
@@ -4939,8 +4577,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                     static_cast<std::uint32_t>(decode_count), triangle_indices);
             }
             if (accepted) {
-                if (collect_diagnostic_stats) stats.decoded_vertices += decode_count;
-                if (collect_diagnostic_stats) stats.triangles += packed_triangle_count;
                 advance_stream();
                 return true;
             }
@@ -4949,7 +4585,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
 
         // Draws with vertices outside guest memory run inline to report the error.
         HwDrawQueue &queue = hw_draw_queue();
-        bool deferred = queue.enabled() && !collect_diagnostic_stats && !ge_phase_diag_enabled();
+        bool deferred = queue.enabled();
         if (deferred && !contiguous_decode) {
             for (std::uint32_t index : unique_indices) {
                 if (!memory.contains(vertex_address + index * layout.stride, layout.stride)) {
@@ -4965,7 +4601,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
         if (!deferred) queue.drain();
         HwDrawJob &job = deferred ? queue.acquire() : inline_job;
         {
-            PhaseTimer vertex_timer(g_ge_vertex_decode_ns, &g_live_vertex_ns);
             // Model-space only. Skin, morph, generated UVs, and baked light stay uncached.
             const bool cacheable = !cpu_lighting_effective && layout.weight_type == 0u &&
                 layout.morph_count <= 1u && uv_generation == 0u;
@@ -4974,8 +4609,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                 contiguous_raw, contiguous_raw_bytes, unique_indices, layout, decode_count)
                 : StaticVertexProbe{};
             job.reused_vertices = reuse_static_vertices(job.probe, job.decoded_vertices);
-            if (job.reused_vertices && speed_list_split_enabled())
-                g_live_vertex_reused.fetch_add(decode_count, std::memory_order_relaxed);
         }
         job.memory = &memory;
         job.commands = commands;
@@ -5009,25 +4642,11 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             queue.publish(framebuffer_address(commands) & 0x001FFFF0u);
             queue.commit_ready(false);
         } else {
-            {
-                PhaseTimer vertex_timer(g_ge_vertex_decode_ns, &g_live_vertex_ns);
-                if (!hw_job_prepare(job)) {
-                    error = job.error;
-                    return false;
-                }
+            if (!hw_job_prepare(job)) {
+                error = job.error;
+                return false;
             }
-            {
-                PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
-                hw_job_commit(job);
-            }
-            if (collect_diagnostic_stats) {
-                stats.decoded_vertices += job.decoded_vertices.size();
-                stats.triangles += job.submit == HwDrawJob::Submit::Direct
-                                       ? count / 3u
-                                       : job.triangle_indices.size() / 3u;
-            }
-            if (job.flat_shading && job.submit != HwDrawJob::Submit::Direct)
-                stats.flat_shaded_primitives += job.triangle_indices.size() / 3u;
+            hw_job_commit(job);
         }
         advance_stream();
         return true;
@@ -5036,14 +4655,10 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
     hw_draw_queue().drain();
 
     FragmentSetup setup = make_fragment_setup_cached(commands);
-    {
-        PhaseTimer bind_timer(g_ge_draw_setup_ns);
-        bind_fragment_buffers(setup, memory, commands);
-    }
+    bind_fragment_buffers(setup, memory, commands);
 
     static thread_local std::vector<Vertex> vertices;
     {
-        PhaseTimer vertex_timer(g_ge_vertex_decode_ns, &g_live_vertex_ns);
         vertices.clear();
         vertices.reserve(count);
         const IndexStreamReader draw_indices =
@@ -5053,8 +4668,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             Vertex vertex{};
             if (!decode_vertex_optimized(memory, vertex_address + index * layout.stride, layout,
                                          commands, transform, vertex, error)) return false;
-            record_clip_vertex(stats, vertex);
-            if (layout.through) record_screen_vertex(stats, vertex);
             vertices.push_back(vertex);
         }
     }
@@ -5113,7 +4726,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
     if (legacy_vertex_staging_enabled() && gpu_backend_enabled &&
         ge_gpu_backend_transfer_ready() &&
         primitive >= 3u && primitive <= 5u && !gpu_draw.clear_mode) {
-        PhaseTimer stage_timer(g_ge_gpu_stage_ns);
         std::vector<GeGpuVertex> gpu_vertices;
         gpu_vertices.reserve(vertices.size());
         for (const Vertex &vertex : vertices) {
@@ -5134,94 +4746,80 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
     switch (primitive) {
     case 0u:
         for (const Vertex &vertex : vertices) {
-            rasterize_point(memory, commands, setup, vertex, layout.through, stats);
-            if (collect_diagnostic_stats) ++stats.points;
+            rasterize_point(memory, commands, setup, vertex, layout.through);
         }
         break;
     case 1u:
         for (std::size_t i = 0u; i + 1u < vertices.size(); i += 2u) {
-            rasterize_line(memory, commands, setup, vertices[i], vertices[i + 1u], layout.through, stats);
-            if (collect_diagnostic_stats) ++stats.lines;
+            rasterize_line(memory, commands, setup, vertices[i], vertices[i + 1u], layout.through);
         }
         break;
     case 2u:
         for (std::size_t i = 0u; i + 1u < vertices.size(); ++i) {
-            rasterize_line(memory, commands, setup, vertices[i], vertices[i + 1u], layout.through, stats);
-            if (collect_diagnostic_stats) ++stats.lines;
+            rasterize_line(memory, commands, setup, vertices[i], vertices[i + 1u], layout.through);
         }
         break;
     case 3u: {
         static thread_local std::vector<PreparedScreenTriangle> triangles; triangles.clear();
         {
-            PhaseTimer prep_timer(g_ge_triangle_prep_ns);
             triangles.reserve(vertices.size() / 3u + 2u);
             for (std::size_t i = 0u; i + 2u < vertices.size(); i += 3u) {
                 append_prepared_triangles(commands, setup,
                                           vertices[i], vertices[i + 1u], vertices[i + 2u],
-                                          vertices[i + 2u], layout.through, stats, triangles, gpu_only_triangle_path);
-                if (collect_diagnostic_stats) ++stats.triangles;
+                                          vertices[i + 2u], layout.through, triangles, gpu_only_triangle_path);
             }
         }
         if (gpu_backend_enabled) {
-            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
             accumulate_gpu_prepared_triangles(gpu_draw, triangles);
         }
-        rasterize_prepared_triangles(memory, commands, setup, triangles, stats);
+        rasterize_prepared_triangles(memory, commands, setup, triangles);
         break;
     }
     case 4u: {
         static thread_local std::vector<PreparedScreenTriangle> triangles; triangles.clear();
         {
-            PhaseTimer prep_timer(g_ge_triangle_prep_ns);
             triangles.reserve(vertices.size() + 2u);
             for (std::size_t i = 0u; i + 2u < vertices.size(); ++i) {
                 if ((i & 1u) == 0u)
                     append_prepared_triangles(commands, setup,
                                               vertices[i], vertices[i + 1u], vertices[i + 2u],
-                                              vertices[i + 2u], layout.through, stats, triangles, gpu_only_triangle_path);
+                                              vertices[i + 2u], layout.through, triangles, gpu_only_triangle_path);
                 else
                     append_prepared_triangles(commands, setup,
                                               vertices[i + 1u], vertices[i], vertices[i + 2u],
-                                              vertices[i + 2u], layout.through, stats, triangles, gpu_only_triangle_path);
-                if (collect_diagnostic_stats) ++stats.triangles;
+                                              vertices[i + 2u], layout.through, triangles, gpu_only_triangle_path);
             }
         }
         if (gpu_backend_enabled) {
-            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
             accumulate_gpu_prepared_triangles(gpu_draw, triangles);
         }
-        rasterize_prepared_triangles(memory, commands, setup, triangles, stats);
+        rasterize_prepared_triangles(memory, commands, setup, triangles);
         break;
     }
     case 5u: {
         static thread_local std::vector<PreparedScreenTriangle> triangles; triangles.clear();
         {
-            PhaseTimer prep_timer(g_ge_triangle_prep_ns);
             triangles.reserve(vertices.size() + 2u);
             for (std::size_t i = 1u; i + 1u < vertices.size(); ++i) {
                 append_prepared_triangles(commands, setup,
                                           vertices[0], vertices[i], vertices[i + 1u],
-                                          vertices[i + 1u], layout.through, stats, triangles, gpu_only_triangle_path);
-                if (collect_diagnostic_stats) ++stats.triangles;
+                                          vertices[i + 1u], layout.through, triangles, gpu_only_triangle_path);
             }
         }
         if (gpu_backend_enabled) {
-            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
             accumulate_gpu_prepared_triangles(gpu_draw, triangles);
         }
-        rasterize_prepared_triangles(memory, commands, setup, triangles, stats);
+        rasterize_prepared_triangles(memory, commands, setup, triangles);
         break;
     }
     case 6u:
         for (std::size_t i = 0u; i + 1u < vertices.size(); i += 2u) {
             if (gpu_backend_enabled)
                 accumulate_gpu_rectangle(gpu_draw, vertices[i], vertices[i + 1u]);
-            rasterize_rectangle(memory, commands, setup, vertices[i], vertices[i + 1u], stats);
-            if (collect_diagnostic_stats) ++stats.rectangles;
+            rasterize_rectangle(memory, commands, setup, vertices[i], vertices[i + 1u]);
         }
         break;
     default:
-        if (collect_diagnostic_stats) ++stats.unsupported_primitives;
         break;
     }
     advance_stream();
@@ -5231,39 +4829,6 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
 void flush_ge_deferred_rasterization(psprecomp::GuestMemory &memory) {
     hw_draw_queue().drain();
     flush_deferred_batches(memory);
-}
-
-GePhaseTotals ge_phase_totals() noexcept {
-    return GePhaseTotals{
-        g_ge_pixel_ns, g_ge_triangle_count,
-        g_ge_draw_setup_ns, g_ge_texture_upload_ns, g_ge_vertex_decode_ns,
-        g_ge_gpu_stage_ns, g_ge_triangle_prep_ns, g_ge_gpu_accumulate_ns,
-        g_ge_primitive_count, g_ge_vertex_count,
-    };
-}
-
-GeListSplitNs take_ge_list_split() noexcept {
-    return GeListSplitNs{
-        g_live_vertex_ns.exchange(0u, std::memory_order_relaxed),
-        g_live_tex_hash_ns.exchange(0u, std::memory_order_relaxed),
-        g_live_tex_decode_ns.exchange(0u, std::memory_order_relaxed),
-        g_live_vertex_copy_ns.exchange(0u, std::memory_order_relaxed),
-        g_live_vertex_reused.exchange(0u, std::memory_order_relaxed),
-        g_live_vertex_decoded.exchange(0u, std::memory_order_relaxed),
-    };
-}
-
-void reset_ge_phase_totals() noexcept {
-    g_ge_pixel_ns = 0u;
-    g_ge_triangle_count = 0u;
-    g_ge_draw_setup_ns = 0u;
-    g_ge_texture_upload_ns = 0u;
-    g_ge_vertex_decode_ns = 0u;
-    g_ge_gpu_stage_ns = 0u;
-    g_ge_triangle_prep_ns = 0u;
-    g_ge_gpu_accumulate_ns = 0u;
-    g_ge_primitive_count = 0u;
-    g_ge_vertex_count = 0u;
 }
 
 }

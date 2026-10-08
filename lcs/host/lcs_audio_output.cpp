@@ -34,8 +34,6 @@ struct WaveOutDevice {
     bool opened{};
     bool failed{};
 
-    [[nodiscard]] const char *backend_name() const noexcept { return "waveOut"; }
-
     bool ensure_open(AudioMixer &mixer) {
         if (opened) return true;
         if (failed) return false;
@@ -48,8 +46,6 @@ struct WaveOutDevice {
         format.nAvgBytesPerSec = AudioMixer::kSampleRate * format.nBlockAlign;
         const MMRESULT open_result = waveOutOpen(&device, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL);
         if (open_result != MMSYSERR_NOERROR) {
-            if (AudioMixer::diagnostics_enabled())
-                std::cerr << "[audio-host] waveOutOpen failed code=" << open_result << "\n";
             failed = true;
             device = nullptr;
             return false;
@@ -59,13 +55,6 @@ struct WaveOutDevice {
         next_block = 0u;
         opened = true;
         mixer.note_device_opened();
-        if (AudioMixer::diagnostics_enabled())
-            std::cerr << "[audio-host] waveOut 44100Hz stereo block_frames=" << AudioMixer::kBlockFrames
-                      << " blocks=" << AudioMixer::kBlockCount
-                      << " prebuffer_blocks=" << mixer.prebuffer_blocks()
-                      << " prebuffer_ms="
-                      << (mixer.prebuffer_blocks() * AudioMixer::kBlockFrames * 1000u /
-                          AudioMixer::kSampleRate) << "\n";
         return true;
     }
 
@@ -94,16 +83,9 @@ struct WaveOutDevice {
         block.header.lpData = reinterpret_cast<LPSTR>(block.samples.data());
         block.header.dwBufferLength =
             static_cast<DWORD>(block.samples.size() * sizeof(std::int16_t));
-        const MMRESULT prepare_result = waveOutPrepareHeader(device, &block.header, sizeof(WAVEHDR));
-        if (prepare_result != MMSYSERR_NOERROR) {
-            if (AudioMixer::diagnostics_enabled())
-                std::cerr << "[audio-host] waveOutPrepareHeader failed code=" << prepare_result << "\n";
+        if (waveOutPrepareHeader(device, &block.header, sizeof(WAVEHDR)) != MMSYSERR_NOERROR)
             return false;
-        }
-        const MMRESULT write_result = waveOutWrite(device, &block.header, sizeof(WAVEHDR));
-        if (write_result != MMSYSERR_NOERROR) {
-            if (AudioMixer::diagnostics_enabled())
-                std::cerr << "[audio-host] waveOutWrite failed code=" << write_result << "\n";
+        if (waveOutWrite(device, &block.header, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
             waveOutUnprepareHeader(device, &block.header, sizeof(WAVEHDR));
             return false;
         }
@@ -251,7 +233,6 @@ void audio_output_advance(std::uint64_t guest_time_us) {
     AudioHost &host = audio_host();
     std::lock_guard<std::mutex> guard(host.mutex);
     host.mixer.advance(guest_time_us, host.device);
-    host.mixer.write_summary(guest_time_us, host.device);
 }
 
 void audio_output_reset_channel(std::uint32_t channel) {

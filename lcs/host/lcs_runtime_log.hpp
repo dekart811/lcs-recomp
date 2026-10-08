@@ -6,9 +6,6 @@
 
 namespace lcs {
 
-struct LcsConfiguration;
-
-void runtime_log_initialize(const LcsConfiguration &configuration);
 void runtime_log_shutdown() noexcept;
 [[nodiscard]] bool runtime_log_enabled() noexcept;
 [[nodiscard]] std::filesystem::path runtime_log_path();

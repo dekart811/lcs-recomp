@@ -110,9 +110,6 @@ struct RenderingConfiguration {
     bool hardware_transform{true};
     bool dx12_ge_color{true};
     bool smaa{false};
-    bool experimental_gpu_color_preview{false};
-    bool gpu_geometry_debug_colors{false};
-    std::uint64_t dump_gpu_frame_vblank{0u};
 };
 
 [[nodiscard]] InternalResolutionDimensions resolve_internal_resolution(
@@ -121,23 +118,14 @@ struct RenderingConfiguration {
 struct AudioConfiguration {
     bool enabled{true};
     std::uint32_t volume{100u};
-    bool diagnostics{true};
     std::uint32_t prebuffer_blocks{6u};
     std::uint32_t recovery_prebuffer_blocks{12u};
 };
 
 struct TimingConfiguration {
     std::uint32_t frame_rate{60u};
-    bool realtime_speed_diagnostics{false};
-    std::uint64_t realtime_speed_interval_vblanks{120u};
     // Host sleep off. Each vblank still advances one 60 Hz guest step.
     bool uncapped{false};
-};
-
-struct DiagnosticsConfiguration {
-    bool log_to_file{false};
-    std::string log_file{"LCSNative.log"};
-    bool flush_every_line{true};
 };
 
 struct WidescreenConfiguration {
@@ -165,7 +153,6 @@ struct LcsConfiguration {
     RenderingConfiguration rendering{};
     AudioConfiguration audio{};
     TimingConfiguration timing{};
-    DiagnosticsConfiguration diagnostics{};
     WidescreenConfiguration widescreen{};
     std::filesystem::path source_path{};
     std::filesystem::path executable_directory{};

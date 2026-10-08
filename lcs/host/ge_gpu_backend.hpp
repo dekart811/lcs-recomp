@@ -447,6 +447,5 @@ inline GeGuestPresent &ge_guest_present() noexcept {
 void ge_gpu_backend_mark_window_presented() noexcept;
 
 [[nodiscard]] GeGpuBackendReport ge_gpu_backend_report();
-[[nodiscard]] const char *ge_gpu_backend_name(GeGpuBackendKind kind) noexcept;
 
 }

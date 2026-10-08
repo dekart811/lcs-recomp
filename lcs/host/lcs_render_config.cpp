@@ -92,21 +92,6 @@ bool parse_u32(std::string value, std::uint32_t minimum, std::uint32_t maximum,
     return true;
 }
 
-bool parse_u64(std::string value, std::uint64_t minimum, std::uint64_t maximum,
-               std::uint64_t &out) {
-    value = trim_copy(std::move(value));
-    if (value.empty()) return false;
-    errno = 0;
-    char *end = nullptr;
-    const unsigned long long parsed = std::strtoull(value.c_str(), &end, 10);
-    if (errno == ERANGE || end == value.c_str() || *end != '\0' ||
-        parsed < minimum || parsed > maximum) {
-        return false;
-    }
-    out = static_cast<std::uint64_t>(parsed);
-    return true;
-}
-
 bool parse_float(std::string value, float minimum, float maximum, float &out) {
     value = trim_copy(std::move(value));
     if (value.empty()) return false;
@@ -316,21 +301,6 @@ void apply_rendering_key(LcsConfiguration &config, const std::string &key,
             warning(config, line, "Rendering.InternalHeight must be between 272 and 16384");
         return;
     }
-    if (key == "experimentalgpucolorpreview" || key == "gpucolorpreview") {
-        if (!parse_bool(value, config.rendering.experimental_gpu_color_preview))
-            warning(config, line, "Rendering.ExperimentalGpuColorPreview expects true/false");
-        return;
-    }
-    if (key == "geometrydebugcolors" || key == "gpugeometrydebugcolors") {
-        if (!parse_bool(value, config.rendering.gpu_geometry_debug_colors))
-            warning(config, line, "Rendering.GeometryDebugColors expects true/false");
-        return;
-    }
-    if (key == "dumpgpuframevblank" || key == "dumpinternalframevblank") {
-        if (!parse_u64(value, 0u, 1000000000u, config.rendering.dump_gpu_frame_vblank))
-            warning(config, line, "Rendering.DumpGpuFrameVblank must be between 0 and 1000000000");
-        return;
-    }
     warning(config, line, "unknown [Rendering] key '" + key + "'");
 }
 
@@ -344,11 +314,6 @@ void apply_audio_key(LcsConfiguration &config, const std::string &key,
     if (key == "volume") {
         if (!parse_u32(value, 0u, 400u, config.audio.volume))
             warning(config, line, "Audio.Volume must be between 0 and 400 (percent)");
-        return;
-    }
-    if (key == "diagnostics" || key == "performancelog") {
-        if (!parse_bool(value, config.audio.diagnostics))
-            warning(config, line, "Audio.Diagnostics expects true/false");
         return;
     }
     if (key == "prebufferblocks") {
@@ -451,45 +416,12 @@ void apply_timing_key(LcsConfiguration &config, const std::string &key,
         config.timing.frame_rate = frame_rate;
         return;
     }
-    if (key == "realtimespeeddiagnostics" || key == "showspeeddiagnostics") {
-        if (!parse_bool(value, config.timing.realtime_speed_diagnostics))
-            warning(config, line, "Timing.RealtimeSpeedDiagnostics expects true/false");
-        return;
-    }
-    if (key == "realtimespeedintervalvblanks" || key == "speedintervalvblanks") {
-        if (!parse_u64(value, 1u, 36000u, config.timing.realtime_speed_interval_vblanks))
-            warning(config, line, "Timing.RealtimeSpeedIntervalVblanks must be between 1 and 36000");
-        return;
-    }
     if (key == "uncapped") {
         if (!parse_bool(value, config.timing.uncapped))
             warning(config, line, "Timing.Uncapped expects true/false");
         return;
     }
     warning(config, line, "unknown [Timing] key '" + key + "'");
-}
-
-void apply_diagnostics_key(LcsConfiguration &config, const std::string &key,
-                           const std::string &value, std::size_t line) {
-    if (key == "logtofile" || key == "enablelog" || key == "enabled") {
-        if (!parse_bool(value, config.diagnostics.log_to_file))
-            warning(config, line, "Diagnostics.LogToFile expects true/false");
-        return;
-    }
-    if (key == "logfile" || key == "filename") {
-        const std::string trimmed = trim_copy(value);
-        if (trimmed.empty())
-            warning(config, line, "Diagnostics.LogFile must not be empty");
-        else
-            config.diagnostics.log_file = trimmed;
-        return;
-    }
-    if (key == "flusheveryline" || key == "autoflush") {
-        if (!parse_bool(value, config.diagnostics.flush_every_line))
-            warning(config, line, "Diagnostics.FlushEveryLine expects true/false");
-        return;
-    }
-    warning(config, line, "unknown [Diagnostics] key '" + key + "'");
 }
 
 LcsConfiguration &global_configuration() {
@@ -716,8 +648,6 @@ LcsConfiguration load_lcs_render_configuration(const std::filesystem::path &path
             apply_audio_key(config, key, value, line_number);
         else if (section == "timing")
             apply_timing_key(config, key, value, line_number);
-        else if (section == "diagnostics" || section == "logging")
-            apply_diagnostics_key(config, key, value, line_number);
         else if (section == "widescreen")
             apply_widescreen_key(config, key, value, line_number);
         else if (section == "controls")
@@ -757,14 +687,6 @@ void initialize_lcs_render_configuration(const std::filesystem::path &executable
     }
 
     const LcsConfiguration &config = global_configuration();
-    if (config.timing.realtime_speed_diagnostics &&
-        std::getenv("PSPRECOMP_REALTIME_SPEED_DIAG") == nullptr) {
-        set_environment_value("PSPRECOMP_REALTIME_SPEED_DIAG", "1");
-    }
-    if (std::getenv("PSPRECOMP_REALTIME_SPEED_INTERVAL") == nullptr) {
-        set_environment_value("PSPRECOMP_REALTIME_SPEED_INTERVAL",
-                              std::to_string(config.timing.realtime_speed_interval_vblanks));
-    }
     if (config.timing.uncapped && std::getenv("LCS_UNCAPPED") == nullptr)
         set_environment_value("LCS_UNCAPPED", "1");
     if (std::getenv("PSPRECOMP_GE_BACKEND") == nullptr) {
@@ -785,19 +707,6 @@ void initialize_lcs_render_configuration(const std::filesystem::path &executable
     if (std::getenv("PSPRECOMP_GE_GPU_TEXTURE_CACHE_MB") == nullptr)
         set_environment_value("PSPRECOMP_GE_GPU_TEXTURE_CACHE_MB",
                               std::to_string(config.rendering.texture_cache_mb));
-    if (config.rendering.experimental_gpu_color_preview &&
-        std::getenv("PSPRECOMP_GE_GPU_COLOR_PREVIEW") == nullptr) {
-        set_environment_value("PSPRECOMP_GE_GPU_COLOR_PREVIEW", "1");
-    }
-    if (config.rendering.gpu_geometry_debug_colors &&
-        std::getenv("PSPRECOMP_GE_GPU_GEOMETRY_DEBUG_COLORS") == nullptr) {
-        set_environment_value("PSPRECOMP_GE_GPU_GEOMETRY_DEBUG_COLORS", "1");
-    }
-    if (config.rendering.dump_gpu_frame_vblank != 0u &&
-        std::getenv("PSPRECOMP_GE_GPU_DUMP_VBLANK") == nullptr) {
-        set_environment_value("PSPRECOMP_GE_GPU_DUMP_VBLANK",
-                              std::to_string(config.rendering.dump_gpu_frame_vblank));
-    }
 }
 
 const LcsConfiguration &lcs_render_configuration() {

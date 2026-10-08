@@ -436,14 +436,6 @@ void display_window_attach_gpu_backend() {
     if (g_window != nullptr) ge_gpu_backend_set_native_window(g_window);
 }
 
-bool display_window_profile_key_pressed() {
-    static bool was_down = false;
-    const bool down = g_window != nullptr && GetForegroundWindow() == g_window && key_down('P');
-    const bool pressed = down && !was_down;
-    was_down = down;
-    return pressed;
-}
-
 bool display_window_closed() { return g_closed; }
 
 std::atomic<int> g_fullscreen_request{-1};

@@ -9,7 +9,6 @@ namespace lcs {
 
 void display_window_init();
 void display_window_attach_gpu_backend();
-[[nodiscard]] bool display_window_profile_key_pressed();
 [[nodiscard]] bool display_window_closed();
 void display_window_pump();
 void display_window_present(psprecomp::Runtime &runtime, std::uint32_t frame_buffer,

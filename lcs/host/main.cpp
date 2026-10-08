@@ -74,23 +74,12 @@ int main(int argc, char **argv) {
         const std::uint32_t user_arena_start =
             static_cast<std::uint32_t>((image_end + 0xFFu) & ~0xFFull);
         lcs::display_window_init();
-        const lcs::DisplaySurfaceDimensions window_size = lcs::resolve_window_dimensions();
-        const lcs::InternalResolutionDimensions internal_size =
-            lcs::resolve_internal_resolution(lcs::lcs_render_configuration().rendering);
-        std::cerr << "[display] window=" << window_size.width << "x" << window_size.height
-                  << " internal=" << internal_size.width << "x" << internal_size.height
-                  << " view_distance=" << lcs::view_distance_scale()
-                  << " texture_lod_bias=" << lcs::rendering_texture_lod_bias() << "\n";
         lcs::install_profile(runtime, user_arena_start);
 
         std::string gpu_backend_error;
         if (!lcs::initialize_ge_gpu_backend(gpu_backend_error))
             std::cerr << "[ge] GPU backend unavailable: " << gpu_backend_error << "\n";
         lcs::display_window_attach_gpu_backend();
-        const lcs::GeGpuBackendReport gpu_start = lcs::ge_gpu_backend_report();
-        std::cerr << "[ge] backend requested=" << lcs::ge_gpu_backend_name(gpu_start.requested)
-                  << " active=" << lcs::ge_gpu_backend_name(gpu_start.active)
-                  << " status=" << gpu_start.message << "\n";
         lcs::set_wall_clock_limit(max_seconds);
 
         if (const auto module = elf.find_module_info(runtime.memory(), psprecomp::kDefaultPspUserLoadBase)) {
@@ -109,37 +98,7 @@ int main(int argc, char **argv) {
 
         if (runtime.stopped()) {
             std::cout << "Runtime stopped: " << runtime.stop_reason() << "\n";
-            lcs::debug_dump_threads();
-            lcs::dump_pc_profile();
-            lcs::dump_framebuffer_stats(runtime);
-            lcs::dump_watched_memory(runtime);
-            lcs::dump_disc_read_stats();
         }
-        if (std::getenv("PSPRECOMP_GE_PHASE_DIAG") != nullptr) {
-            const lcs::GePhaseTotals phases = lcs::ge_phase_totals();
-            std::cerr << "[ge-phase] pixel_loop_ms=" << phases.pixel_loop_ns / 1000000u
-                      << " draw_setup_ms=" << phases.draw_setup_ns / 1000000u
-                      << " texture_upload_ms=" << phases.texture_upload_ns / 1000000u
-                      << " vertex_decode_ms=" << phases.vertex_decode_ns / 1000000u
-                      << " triangle_prep_ms=" << phases.triangle_prep_ns / 1000000u
-                      << " triangles=" << phases.triangles
-                      << " primitives=" << phases.primitives
-                      << " vertices=" << phases.vertices << "\n";
-        }
-        runtime.report_hle_histogram(60u);
-        const lcs::GeGpuBackendReport gpu_end = lcs::ge_gpu_backend_report();
-        std::cerr << "[ge-gpu] frames=" << gpu_end.game_frames
-                  << " draws=" << gpu_end.game_draw_calls
-                  << " tris=" << gpu_end.game_triangles
-                  << " verts=" << gpu_end.game_vertices
-                  << " hw_transform_draws=" << gpu_end.hw_transform_draw_calls
-                  << " tex_uploads=" << gpu_end.decoded_texture_uploads
-                  << " tex_hits=" << gpu_end.texture_cache_hits
-                  << " rejected=" << gpu_end.rejected_gpu_draws
-                  << " no_texture=" << gpu_end.game_textured_draws_without_texture
-                  << " vertex_overflows=" << gpu_end.game_vertex_overflows
-                  << " no_display_target=" << gpu_end.frames_without_displayed_target
-                  << " presented=" << gpu_end.gpu_frame_presented_to_window << "\n";
         lcs::audio_output_shutdown();
     } catch (const std::exception &ex) {
         std::cerr << "LCSNative error: " << ex.what() << "\n";

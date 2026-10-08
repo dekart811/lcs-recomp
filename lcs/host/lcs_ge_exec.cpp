@@ -2,11 +2,8 @@
 
 #include "ge_renderer.hpp"
 #include "lcs_menu.hpp"
-#include "psprecomp/common.hpp"
 
 #include <array>
-#include <cstdlib>
-#include <iostream>
 #include <string>
 
 namespace lcs {
@@ -35,10 +32,6 @@ void execute_ge_list_rendered(psprecomp::GuestMemory &memory, std::uint32_t list
     ge_finish_arg = 0u;
     if (list_address == 0u) return;
 
-    static const bool diag = std::getenv("LCS_GE_RENDER_DIAG") != nullptr;
-    std::uint64_t total_pixels_tested = 0u;
-    std::uint64_t total_pixels_written = 0u;
-    std::uint64_t total_triangles = 0u;
     std::array<std::uint32_t, 16> call_stack{};
     std::uint32_t call_depth = 0u;
     std::uint32_t pc = list_address;
@@ -88,34 +81,18 @@ void execute_ge_list_rendered(psprecomp::GuestMemory &memory, std::uint32_t list
             break;
         case 0x0Cu:
             flush_ge_deferred_rasterization(memory);
-            if (diag) {
-                static std::uint64_t lists = 0u;
-                if ((++lists % 30u) == 0u)
-                    std::cerr << "[ge-render] list=" << lists << " tris=" << total_triangles
-                              << " tested=" << total_pixels_tested
-                              << " written=" << total_pixels_written << "\n";
-            }
             return;
         case 0x04u: {
             GeRenderStats stats{};
             std::string error;
             lcs_set_ge_command(op_pc);
             if (!render_ge_primitive(memory, ge_commands, ge_transform, ge_vertex_address,
-                                     ge_index_address, data, stats, error, 1u, 0u, 0u, 0u,
-                                     diag)) {
-                if (diag)
-                    std::cerr << "[ge-render] primitive failed at " << psprecomp::hex32(op_pc)
-                              << ": " << error << "\n";
+                                     ge_index_address, data, stats, error)) {
                 flush_ge_deferred_rasterization(memory);
                 return;
             }
             ge_vertex_address = stats.next_vertex_address;
             ge_index_address = stats.next_index_address;
-            if (diag) {
-                total_pixels_tested += stats.pixels_tested;
-                total_pixels_written += stats.pixels_written;
-                total_triangles += stats.triangles;
-            }
             break;
         }
         default:

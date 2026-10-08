@@ -2,7 +2,6 @@
 #include "ge_present_shader.hpp"
 #include "lcs_display_menu.hpp"
 #include "lcs_render_config.hpp"
-#include "lcs_runtime_log.hpp"
 
 #include <algorithm>
 #include <array>
@@ -278,7 +277,6 @@ struct Dx12RetiredSrv {
 
 
 struct Dx12GeState {
-    GeGpuBackendReport report{};
     bool enabled{};
     std::uint32_t display_framebuffer{};
     std::uint32_t display_logical_width{kReferenceWidth};
@@ -470,7 +468,6 @@ std::uint32_t allocate_texture_srv(Dx12GeState &s) noexcept {
     if (!s.free_texture_srvs.empty()) {
         const std::uint32_t index = s.free_texture_srvs.back();
         s.free_texture_srvs.pop_back();
-        ++s.report.recycled_texture_descriptor_sets;
         return index;
     }
     if (s.next_srv >= kSrvCapacity) return 0u;
@@ -623,7 +620,6 @@ void resolve_target_for_sampling(Dx12GeState &s, Dx12FramebufferTarget &target,
         target.color_state = D3D12_RESOURCE_STATE_RESOLVE_DEST;
         s.list->ResolveSubresource(target.color.Get(), 0u, target.msaa_color.Get(), 0u,
                                    kColorFormat);
-        ++s.report.dx12_resolves;
         transition(s.list.Get(), target.color.Get(), target.color_state,
                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         target.color_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -760,8 +756,6 @@ void select_depth_and_msaa(Dx12GeState &s) noexcept {
             break;
         }
     }
-    s.report.dx12_msaa_samples = s.sample_count;
-    s.report.dx12_depth_bits = s.depth_bits;
 }
 
 D3D12_COMPARISON_FUNC depth_compare(std::uint32_t function) noexcept {
@@ -1441,17 +1435,6 @@ bool ensure_framebuffer_target(Dx12GeState &s, std::uint32_t address,
     target.color_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     s.frame_targets.emplace(address, std::move(target));
     s.known_frame_targets.insert(address);
-    s.report.framebuffer_targets_observed = s.known_frame_targets.size();
-    s.report.native_framebuffer_targets = s.frame_targets.size();
-    {
-        std::ostringstream log;
-        const auto created = s.frame_targets.find(address);
-        log << "dx12 framebuffer target created address=0x" << std::hex << address
-            << std::dec << " size=" << s.target_width << 'x' << s.target_height
-            << " msaa=" << s.sample_count << " depth=" << s.depth_bits
-            << " srv=" << (created != s.frame_targets.end() ? created->second.srv_index : 0u);
-        runtime_log_line(log.str());
-    }
     return true;
 }
 
@@ -1608,8 +1591,6 @@ ID3D12PipelineState *pipeline_for(Dx12GeState &s, const GeGpuDrawDescriptor &dra
     if (!pipeline) return nullptr;
     ID3D12PipelineState *raw = pipeline.Get();
     s.pipelines.emplace(key, std::move(pipeline));
-    s.report.unique_pipeline_keys = s.pipelines.size();
-    s.report.graphics_pipeline_created = true;
     return raw;
 }
 
@@ -1667,7 +1648,6 @@ std::uint32_t ensure_sampler(Dx12GeState &s, const GeGpuDrawDescriptor &draw) no
     }
     s.device->CreateSampler(&sampler, sampler_cpu(s, index));
     s.sampler_cache.emplace(key, index);
-    s.report.texture_samplers_created = s.sampler_cache.size() + 1u;
     return index;
 }
 
@@ -1788,11 +1768,7 @@ bool ensure_swapchain(Dx12GeState &s, std::string &error) noexcept {
     if (FAILED(hr)) { error = hr_text(hr, "Query IDXGISwapChain3(DX12 GE)"); return false; }
     s.swap_width = surface_width;
     s.swap_height = surface_height;
-    if (!create_swapchain_buffers(s, error)) return false;
-    s.report.swapchain_active = true;
-    runtime_log_line("dx12 ge direct swapchain created " + std::to_string(surface_width) + "x" +
-                     std::to_string(surface_height));
-    return true;
+    return create_swapchain_buffers(s, error);
 }
 
 std::uint32_t present_sampler(Dx12GeState &s) noexcept {
@@ -1902,10 +1878,7 @@ void composite_settings_overlay(Dx12GeState &s, const HostSettingsView &view) no
     if (!s.settings_pipeline) return;
     Dx12FrameResources &frame = s.frames[s.frame_cursor];
     std::string error;
-    if (!ensure_settings_frame(s, frame, error)) {
-        runtime_log_error("dx12 settings overlay", error);
-        return;
-    }
+    if (!ensure_settings_frame(s, frame, error)) return;
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kSettingsOverlayWidth) *
                                      kSettingsOverlayHeight * 4u);
     rasterize_settings_overlay(view, pixels.data(), kSettingsOverlayWidth, kSettingsOverlayHeight);
@@ -2047,10 +2020,7 @@ void composite_fps_overlay(Dx12GeState &s) noexcept {
     if (!s.settings_pipeline) return;
     Dx12FrameResources &frame = s.frames[s.frame_cursor];
     std::string error;
-    if (!ensure_fps_frame(s, frame, error)) {
-        runtime_log_error("dx12 fps overlay", error);
-        return;
-    }
+    if (!ensure_fps_frame(s, frame, error)) return;
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kFpsOverlayWidth) * kFpsOverlayHeight * 4u);
     rasterize_fps_overlay(pixels.data(), kFpsOverlayWidth, kFpsOverlayHeight);
     const UINT row_pitch = (kFpsOverlayWidth * 4u + 255u) & ~255u;
@@ -2223,7 +2193,6 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
         found->second.signature_epoch = s.frame_epoch;
         if (found->second.checksum == checksum) {
             found->second.descriptor = draw;
-            ++s.report.texture_cache_hits;
             return true;
         }
         for (Dx12FrameResources &retire : s.frames) {
@@ -2247,7 +2216,6 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
                 victim = it;
         }
         if (victim == s.textures.end()) {
-            ++s.report.rejected_texture_decodes;
             return false;
         }
         for (Dx12FrameResources &retire : s.frames) {
@@ -2260,7 +2228,6 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
             s.texture_cache_bytes, victim->second.rgba8.size());
         clear_texture_lookup_cache(s);
         s.textures.erase(victim);
-        ++s.report.evicted_textures;
     }
 
     D3D12_RESOURCE_DESC desc{};
@@ -2282,17 +2249,10 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
     texture.last_used_epoch = s.frame_epoch;
     texture.rgba8 = std::move(packed);
     HRESULT hr = create_texture_image(s, desc, texture);
-    if (FAILED(hr)) {
-        runtime_log_error("dx12 texture create", hr_text(hr, "CreateTextureImage"));
-        return false;
-    }
+    if (FAILED(hr)) return false;
 
     texture.srv_index = allocate_texture_srv(s);
-    if (texture.srv_index == 0u) {
-        ++s.report.rejected_texture_decodes;
-        runtime_log_error("dx12 texture", "SRV descriptor heap exhausted");
-        return false;
-    }
+    if (texture.srv_index == 0u) return false;
     texture.sampler_index = ensure_sampler(s, draw);
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -2300,36 +2260,9 @@ bool prepare_texture_upload(Dx12GeState &s, const GeGpuDrawDescriptor &draw,
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Texture2D.MipLevels = mip_levels;
     s.device->CreateShaderResourceView(texture.image.Get(), &srv, srv_cpu(s, texture.srv_index));
-    const std::uint32_t srv_index = texture.srv_index;
     s.texture_cache_bytes += texture.rgba8.size();
     s.pending_texture_keys.push_back(key);
     s.textures.emplace(key, std::move(texture));
-    ++s.report.decoded_texture_uploads;
-    s.report.decoded_texture_bytes += expected;
-    s.report.texture_images_created = s.textures.size();
-    s.report.texture_image_uploads = s.report.decoded_texture_uploads;
-    s.report.texture_image_upload_bytes += expected;
-    s.report.last_texture_key = key;
-    s.report.last_texture_checksum = checksum;
-    s.report.last_texture_width = base_width;
-    s.report.last_texture_height = base_height;
-    s.report.last_texture_format = draw.texture_format;
-    if (draw.texture_format == 4u) ++s.report.decoded_t4_textures;
-    if (draw.texture_format == 5u) ++s.report.decoded_t8_textures;
-    if (draw.texture_format <= 2u) ++s.report.decoded_direct16_textures;
-    if (draw.texture_format == 3u) ++s.report.decoded_direct32_textures;
-    if (draw.texture_format == 6u) ++s.report.decoded_indexed16_textures;
-    if (draw.texture_format == 7u) ++s.report.decoded_indexed32_textures;
-    if (draw.texture_format == 8u) ++s.report.decoded_dxt1_textures;
-    if (draw.texture_format == 9u) ++s.report.decoded_dxt3_textures;
-    if (draw.texture_format == 10u) ++s.report.decoded_dxt5_textures;
-    if (draw.texture_format >= 8u && draw.texture_format <= 10u)
-        s.report.compressed_texture_formats_active = true;
-    s.report.uploaded_mip_levels += mip_levels;
-    s.report.texture_descriptor_layout_created = true;
-    s.report.texture_descriptor_pool_created = true;
-    s.report.texture_descriptor_sets_allocated = s.textures.size();
-    (void)srv_index;
     return true;
 }
 
@@ -2390,19 +2323,11 @@ void record_pending_texture_uploads(Dx12GeState &s, Dx12FrameResources &frame) n
                 &up_heap, D3D12_HEAP_FLAG_NONE, &upload,
                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                 IID_PPV_ARGS(&fallback_upload));
-            if (FAILED(create_hr)) {
-                runtime_log_error("dx12 texture upload",
-                    hr_text(create_hr, "CreateCommittedResource(texture upload fallback)"));
-                continue;
-            }
+            if (FAILED(create_hr)) continue;
             void *mapped = nullptr;
             const D3D12_RANGE no_read{0u, 0u};
             const HRESULT map_hr = fallback_upload->Map(0u, &no_read, &mapped);
-            if (FAILED(map_hr) || mapped == nullptr) {
-                runtime_log_error("dx12 texture upload",
-                    hr_text(map_hr, "Map(texture upload fallback)"));
-                continue;
-            }
+            if (FAILED(map_hr) || mapped == nullptr) continue;
             upload_resource = fallback_upload.Get();
             mapped_base = static_cast<std::byte *>(mapped);
         }
@@ -2761,98 +2686,36 @@ void destroy_backend(Dx12GeState &s) noexcept {
 bool initialize_ge_gpu_backend(std::string &error) {
     Dx12GeState &s = state();
     destroy_backend(s);
-    s.report = {};
     s.display_framebuffer = 0u;
     const RenderingConfiguration &rendering = lcs_render_configuration().rendering;
-    s.report.requested = rendering.backend == RenderingBackend::DirectX12
-        ? GeGpuBackendKind::DirectX12 : GeGpuBackendKind::Software;
-    s.report.active = GeGpuBackendKind::Software;
-    s.report.frames_in_flight_capacity = kFrameCount;
     if (rendering.backend == RenderingBackend::Vulkan) {
-        s.report.requested = GeGpuBackendKind::Vulkan;
-        s.report.message = "Vulkan GE backend is not built into this Windows binary";
         error.clear();
         return true;
     }
     if (rendering.backend != RenderingBackend::DirectX12) {
-        s.report.message = "Software GE backend active";
         error.clear();
         return true;
     }
     if (!rendering.dx12_ge_color) {
-        s.report.message = "DirectX 12 presentation active; native DX12 GE path is available but DX12GEColor=false";
         error.clear();
         return true;
     }
     if (!create_backend(s, error)) {
         const std::string native_error = error;
-        runtime_log_error("dx12 ge initialize", native_error);
         destroy_backend(s);
         const char *strict = std::getenv("PSPRECOMP_DX12_GE_STRICT");
         const bool strict_mode = strict != nullptr && *strict != '\0' && *strict != '0';
-        s.report.requested = GeGpuBackendKind::DirectX12;
-        s.report.active = GeGpuBackendKind::Software;
-        s.report.frames_in_flight_capacity = kFrameCount;
-        s.report.message = "Native DirectX 12 GE failed; using stable software GE with DX12 presentation: " + native_error;
         error = native_error;
         return !strict_mode;
     }
     s.enabled = true;
-    s.report.active = GeGpuBackendKind::DirectX12;
-    s.report.loader_opened = true;
-    s.report.instance_created = true;
-    s.report.device_created = true;
-    s.report.transfer_buffer_created = true;
-    s.report.transfer_memory_mapped = true;
-    s.report.command_pool_created = true;
-    s.report.transfer_self_test_passed = true;
-    s.report.offscreen_image_created = true;
-    s.report.offscreen_image_memory_bound = true;
-    s.report.offscreen_image_view_created = true;
-    s.report.render_pass_created = true;
-    s.report.framebuffer_created = true;
-    s.report.shader_modules_created = true;
-    s.report.graphics_pipeline_created = false;
-    s.report.offscreen_self_test_passed = true;
-    s.report.physical_device_count = 1u;
-    s.report.graphics_queue_family = 0u;
-    s.report.memory_type_index = 0u;
-    s.report.upload_capacity_bytes = kGeometryUploadCapacity;
-    s.report.offscreen_width = s.target_width;
-    s.report.offscreen_height = s.target_height;
-    s.report.game_frame_readback_bytes = s.readback_enabled ? s.frame_rgba.size() : 0u;
-    s.report.frames_in_flight_capacity = kFrameCount;
-    s.report.texture_descriptor_layout_created = true;
-    s.report.texture_descriptor_pool_created = true;
-    s.report.textured_shader_modules_created = true;
-    s.report.textured_pipeline_created = true;
-    s.report.full_mip_chain_active = true;
-    s.report.mipmap_state_active = true;
-    s.report.base_texture_formats_active = true;
-    s.report.depth_image_created = true;
-    s.report.depth_image_memory_bound = true;
-    s.report.depth_image_view_created = true;
-    s.report.depth_attachment_active = true;
-    s.report.alpha_test_shader_active = true;
-    s.report.standard_alpha_blend_pipeline_active = true;
-    s.report.observed_blend_modes_pipeline_active = true;
-    s.report.color_write_mask_pipeline_active = true;
-    s.report.fog_shader_active = true;
-    s.report.message = "DirectX 12 native GE path: packed/lit 0x0115 GPU decode + native strips/indexing + hardware culling + batch merge + PSP textures + widescreen HUD + direct swapchain";
-    runtime_log_line(std::string("dx12 ge initialized adapter=") + s.adapter_name +
-                     " target=" + std::to_string(s.target_width) + "x" +
-                     std::to_string(s.target_height) +
-                     " msaa=" + std::to_string(s.sample_count) +
-                     " depth=" + std::to_string(s.depth_bits));
     error.clear();
     return true;
 }
 
 void shutdown_ge_gpu_backend() noexcept {
     Dx12GeState &s = state();
-    if (s.enabled) runtime_log_line("dx12 ge shutdown");
     destroy_backend(s);
-    s.report = {};
     s.display_framebuffer = 0u;
 }
 
@@ -2863,19 +2726,14 @@ bool ge_gpu_backend_graphics_ready() noexcept { return state().enabled; }
 void ge_gpu_backend_record_draw(const GeGpuDrawDescriptor &draw) noexcept {
     Dx12GeState &s = state();
     if (!s.enabled) return;
-    ++s.report.draw_calls;
-    s.report.vertices += draw.vertex_count;
-    if (draw.texture_enabled) ++s.report.textured_draw_calls;
     const std::uint32_t target = draw.framebuffer_address & 0x001FFFF0u;
     if (draw.framebuffer_stride != 0u || target == s.display_framebuffer) {
         if (target != s.last_registered_framebuffer_target ||
             find_framebuffer_target(s, target) == nullptr) {
             s.last_registered_framebuffer_target = target;
             s.known_frame_targets.insert(target);
-            s.report.framebuffer_targets_observed = s.known_frame_targets.size();
             std::string error;
-            if (!ensure_framebuffer_target(s, target, error) && !error.empty())
-                runtime_log_error("dx12 framebuffer target", error);
+            (void)ensure_framebuffer_target(s, target, error);
         }
         const std::uint32_t logical_width = target == s.display_framebuffer
             ? s.display_logical_width
@@ -2910,13 +2768,8 @@ void ge_gpu_backend_observe_camera(const std::array<float, 12> &,
                                    const GeGpuDrawDescriptor &,
                                    std::uint32_t) noexcept {}
 
-bool ge_gpu_backend_stage_vertices(const GeGpuDrawDescriptor &, std::span<const GeGpuVertex> vertices) noexcept {
-    Dx12GeState &s = state();
-    if (!s.enabled) return false;
-    ++s.report.staged_draw_calls;
-    s.report.staged_vertices += vertices.size();
-    s.report.staged_bytes += vertices.size_bytes();
-    return true;
+bool ge_gpu_backend_stage_vertices(const GeGpuDrawDescriptor &, std::span<const GeGpuVertex>) noexcept {
+    return state().enabled;
 }
 
 bool ge_gpu_backend_texture_needed(const GeGpuDrawDescriptor &draw) noexcept {
@@ -2925,10 +2778,8 @@ bool ge_gpu_backend_texture_needed(const GeGpuDrawDescriptor &draw) noexcept {
         draw.texture_width == 0u || draw.texture_height == 0u) return false;
     const std::uint32_t feedback_address = draw.texture_address & 0x001FFFF0u;
     if (find_framebuffer_target(s, feedback_address) != nullptr) {
-        ++s.report.texture_cache_hits;
         return false;
     }
-    ++s.report.texture_decode_requests;
     const std::uint64_t key = texture_key(draw);
     Dx12Texture *found = find_cached_texture(s, key);
     if (found == nullptr) return true;
@@ -2937,7 +2788,6 @@ bool ge_gpu_backend_texture_needed(const GeGpuDrawDescriptor &draw) noexcept {
     if (draw.texture_content_signature != 0u &&
         found->descriptor.texture_content_signature != draw.texture_content_signature)
         return true;
-    ++s.report.texture_cache_hits;
     return false;
 }
 
@@ -3064,7 +2914,6 @@ void ge_gpu_backend_accumulate_color_triangles(
         s.indices.size() * sizeof(std::uint32_t) + 16u;
     if (required > kGeometryUploadCapacity ||
         s.vertices.size() > std::numeric_limits<std::uint32_t>::max()) {
-        ++s.report.game_vertex_overflows;
         return;
     }
     try {
@@ -3089,13 +2938,7 @@ void ge_gpu_backend_accumulate_color_triangles(
         batch.framebuffer_feedback = framebuffer_feedback;
         batch.feedback_address = feedback_address;
         (void)append_or_merge_batch(s, std::move(batch));
-        ++s.report.game_draw_calls;
-        s.report.game_triangles += triangle_vertices.size() / 3u;
-        s.report.game_vertices += triangle_vertices.size();
-        if (draw.texture_enabled && sampled_texture) ++s.report.textured_game_draw_calls;
-        else if (draw.texture_enabled) ++s.report.game_textured_draws_without_texture;
     } catch (...) {
-        ++s.report.game_vertex_overflows;
     }
 }
 
@@ -3114,7 +2957,6 @@ void ge_gpu_backend_accumulate_hardware_triangles(
         (transform.primitive == 4u ? emitted_count < 3u : (emitted_count % 3u) != 0u)) return;
     if (s.vertices.size() > std::numeric_limits<std::uint32_t>::max() ||
         s.indices.size() > std::numeric_limits<std::uint32_t>::max()) {
-        ++s.report.game_vertex_overflows;
         return;
     }
 
@@ -3125,12 +2967,10 @@ void ge_gpu_backend_accumulate_hardware_triangles(
         s.packed_0115_vertices.size() +
         (s.indices.size() + indices_to_append) * sizeof(std::uint32_t) + 16u;
     if (required > kGeometryUploadCapacity) {
-        ++s.report.game_vertex_overflows;
         return;
     }
 
     try {
-        const bool sampled_texture = draw.texture_enabled && ge_gpu_backend_texture_available(draw);
         const std::uint32_t first_vertex = static_cast<std::uint32_t>(s.vertices.size());
         const std::uint32_t first_index = static_cast<std::uint32_t>(s.indices.size());
 
@@ -3140,7 +2980,6 @@ void ge_gpu_backend_accumulate_hardware_triangles(
         } else {
             for (std::uint32_t index : triangle_indices) {
                 if (static_cast<std::size_t>(index) >= vertices.size()) {
-                    ++s.report.game_vertex_overflows;
                     s.vertices.resize(first_vertex);
                     return;
                 }
@@ -3151,7 +2990,6 @@ void ge_gpu_backend_accumulate_hardware_triangles(
         if (indexed) {
             for (std::uint32_t index : triangle_indices) {
                 if (static_cast<std::size_t>(index) >= vertices.size()) {
-                    ++s.report.game_vertex_overflows;
                     s.vertices.resize(first_vertex);
                     s.indices.resize(first_index);
                     return;
@@ -3177,20 +3015,7 @@ void ge_gpu_backend_accumulate_hardware_triangles(
         batch.hardware_transform = true;
         batch.transform = transform;
         (void)append_or_merge_batch(s, std::move(batch));
-
-        s.report.game_draw_calls += logical;
-        s.report.game_triangles += transform.primitive == 4u
-            ? (emitted_count > 2u ? emitted_count - 2u : 0u) : emitted_count / 3u;
-        s.report.game_vertices += emitted_count;
-        s.report.hw_transform_draw_calls += logical;
-        s.report.hw_transform_vertices += vertices.size();
-        s.report.hw_transform_prim_batches += logical;
-        s.report.hw_transform_unique_vertices_decoded += transform.unique_vertices_decoded;
-        s.report.hw_transform_index_reuses += transform.index_reuses;
-        if (draw.texture_enabled && sampled_texture) s.report.textured_game_draw_calls += logical;
-        else if (draw.texture_enabled) s.report.game_textured_draws_without_texture += logical;
     } catch (...) {
-        ++s.report.game_vertex_overflows;
     }
 }
 
@@ -3226,7 +3051,6 @@ bool ge_gpu_backend_accumulate_hardware_packed_0115(
         s.packed_0115_vertices.size() + packed_append_bytes +
         (s.indices.size() + index_append_count) * sizeof(std::uint32_t) + 16u;
     if (required > kGeometryUploadCapacity) {
-        ++s.report.game_vertex_overflows;
         return false;
     }
 
@@ -3239,7 +3063,6 @@ bool ge_gpu_backend_accumulate_hardware_packed_0115(
         } else {
             for (std::uint32_t index : triangle_indices) {
                 if (index >= vertex_count) {
-                    ++s.report.game_vertex_overflows;
                     s.packed_0115_vertices.resize(first_packed_byte);
                     return false;
                 }
@@ -3252,7 +3075,6 @@ bool ge_gpu_backend_accumulate_hardware_packed_0115(
         if (indexed) {
             for (std::uint32_t index : triangle_indices) {
                 if (index >= vertex_count) {
-                    ++s.report.game_vertex_overflows;
                     s.packed_0115_vertices.resize(first_packed_byte);
                     s.indices.resize(first_index);
                     return false;
@@ -3280,25 +3102,10 @@ bool ge_gpu_backend_accumulate_hardware_packed_0115(
         batch.hardware_transform = true;
         batch.transform = transform;
         (void)append_or_merge_batch(s, std::move(batch));
-
-        s.report.game_draw_calls += logical;
-        s.report.game_triangles += transform.primitive == 4u
-            ? (emitted_count > 2u ? emitted_count - 2u : 0u) : emitted_count / 3u;
-        s.report.game_vertices += emitted_count;
-        s.report.hw_transform_draw_calls += logical;
-        s.report.hw_transform_vertices += vertex_count;
-        s.report.hw_transform_prim_batches += logical;
-        s.report.hw_transform_unique_vertices_decoded += transform.unique_vertices_decoded;
-        s.report.hw_transform_index_reuses += transform.index_reuses;
-        if (draw.texture_enabled && ge_gpu_backend_texture_available(draw))
-            s.report.textured_game_draw_calls += logical;
-        else if (draw.texture_enabled)
-            s.report.game_textured_draws_without_texture += logical;
         return true;
     } catch (...) {
         s.packed_0115_vertices.resize(first_packed_byte);
         s.indices.resize(first_index);
-        ++s.report.game_vertex_overflows;
         return false;
     }
 }
@@ -3317,7 +3124,6 @@ void ge_gpu_backend_set_native_window(void *native_window) noexcept {
         s.direct_present_ok = false;
         s.presented_framebuffer = 0u;
         s.missed_display_intervals = 0u;
-        s.report.swapchain_active = false;
     }
     s.native_window = window;
 }
@@ -3331,8 +3137,7 @@ void ge_gpu_backend_set_display_framebuffer(std::uint32_t address,
     s.display_logical_height = logical_height != 0u ? logical_height : kReferenceHeight;
     if (!s.enabled || !s.device) return;
     std::string error;
-    if (!ensure_framebuffer_target(s, s.display_framebuffer, error) && !error.empty())
-        runtime_log_error("dx12 display framebuffer", error);
+    (void)ensure_framebuffer_target(s, s.display_framebuffer, error);
     note_framebuffer_logical_extent(s, s.display_framebuffer,
                                     s.display_logical_width, s.display_logical_height);
 }
@@ -3343,7 +3148,7 @@ void ge_gpu_backend_display_logical_size(std::uint32_t &width, std::uint32_t &he
     height = s.display_logical_height;
 }
 
-bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
+bool ge_gpu_backend_finish_color_frame(std::uint64_t) noexcept {
     Dx12GeState &s = state();
     if (!s.enabled || !s.device) {
         clear_accumulation(s);
@@ -3367,7 +3172,6 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     const std::size_t index_bytes = s.indices.size() * sizeof(std::uint32_t);
     const std::size_t bytes = index_offset + index_bytes;
     if (bytes > kGeometryUploadCapacity) {
-        ++s.report.game_vertex_overflows;
         clear_accumulation(s);
         ++s.frame_epoch;
         return false;
@@ -3378,7 +3182,6 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     Dx12FrameResources &frame = s.frames[s.frame_cursor];
     std::string error;
     if (!wait_for_fence(s, frame.fence_value, error)) {
-        runtime_log_error("dx12 ge frame wait", error);
         clear_accumulation(s);
         return false;
     }
@@ -3387,7 +3190,6 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     frame.texture_upload_cursor = 0u;
     if (frame.mapped_upload == nullptr ||
         (s.texture_upload_ring_enabled && frame.mapped_texture_upload == nullptr)) {
-        runtime_log_error("dx12 ge", "frame upload arena is not mapped");
         clear_accumulation(s);
         return false;
     }
@@ -3402,20 +3204,16 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     if (s.native_window != nullptr) {
         std::string present_error;
         direct_possible = ensure_swapchain(s, present_error);
-        if (!direct_possible && !present_error.empty())
-            runtime_log_error("dx12 ge swapchain", present_error);
     }
 
 
     HRESULT hr = frame.allocator->Reset();
     if (FAILED(hr)) {
-        runtime_log_error("dx12 ge", hr_text(hr, "CommandAllocator::Reset"));
         clear_accumulation(s);
         return false;
     }
     hr = s.list->Reset(frame.allocator.Get(), nullptr);
     if (FAILED(hr)) {
-        runtime_log_error("dx12 ge", hr_text(hr, "CommandList::Reset"));
         clear_accumulation(s);
         return false;
     }
@@ -3518,10 +3316,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
         if (active_pipeline == nullptr || batch_pipeline_key != active_pipeline_key) {
             ID3D12PipelineState *pipeline = pipeline_for(
                 s, batch.draw, batch.packed_0115, batch_cull, batch_accept_ccw, error);
-            if (pipeline == nullptr) {
-                runtime_log_error("dx12 ge pipeline", error);
-                continue;
-            }
+            if (pipeline == nullptr) continue;
             if (pipeline != active_pipeline)
                 s.list->SetPipelineState(pipeline);
             active_pipeline = pipeline;
@@ -3558,20 +3353,11 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
                         const D3D12_CPU_DESCRIPTOR_HANDLE self_dsv = dsv_cpu(s, feedback->dsv_index);
                         s.list->OMSetRenderTargets(1u, &self_rtv, FALSE, &self_dsv);
                         srv_index = feedback->feedback_srv_index;
-                        ++s.report.vram_feedback_refreshes;
-                        ++s.report.gpu_feedback_draws;
-                        ++s.report.self_feedback_snapshots;
-                    } else if (!feedback_error.empty()) {
-                        runtime_log_error("dx12 self-feedback", feedback_error);
                     }
                 } else {
                     resolve_target_for_sampling(s, *feedback, false);
                     srv_index = feedback->srv_index;
-                    ++s.report.vram_feedback_refreshes;
-                    ++s.report.gpu_feedback_draws;
                 }
-                if (feedback_address == s.display_framebuffer)
-                    ++s.report.display_framebuffer_sampled_draws;
             } else {
                 if (Dx12Texture *texture = find_cached_texture(s, texture_key(batch.draw));
                     texture != nullptr && texture->image) {
@@ -3651,40 +3437,6 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
         else
             s.list->DrawInstanced(batch.vertex_count, 1u, batch.first_vertex, 0u);
         ++executed_batches;
-
-        if (batch.draw.depth_test_enabled) s.report.depth_tested_game_draw_calls += batch.logical_draw_count;
-        if (batch.draw.depth_write_enabled) s.report.depth_writing_game_draw_calls += batch.logical_draw_count;
-        if (batch.draw.alpha_test_enabled) s.report.alpha_tested_game_draw_calls += batch.logical_draw_count;
-        switch (blend_variant(batch.draw)) {
-        case 1u: s.report.standard_alpha_blended_game_draw_calls += batch.logical_draw_count; break;
-        case 2u: s.report.fixed_replace_blended_game_draw_calls += batch.logical_draw_count; break;
-        case 3u: s.report.additive_blended_game_draw_calls += batch.logical_draw_count; break;
-        default: break;
-        }
-        if (batch.draw.fog_enabled) s.report.fogged_game_draw_calls += batch.logical_draw_count;
-        if (srv_index != 0u) {
-            const std::uint32_t submitted_vertices = batch.indexed ? batch.index_count : batch.vertex_count;
-            s.report.textured_game_triangles +=
-                batch.hardware_transform && batch.transform.primitive == 4u
-                    ? (submitted_vertices > 2u ? submitted_vertices - 2u : 0u)
-                    : submitted_vertices / 3u;
-            s.report.textured_game_vertices += submitted_vertices;
-            switch (batch.draw.texture_function & 7u) {
-            case 0u: s.report.modulate_texture_game_draw_calls += batch.logical_draw_count; break;
-            case 1u: s.report.decal_texture_game_draw_calls += batch.logical_draw_count; break;
-            case 2u: s.report.blend_texture_game_draw_calls += batch.logical_draw_count; break;
-            case 3u: s.report.replace_texture_game_draw_calls += batch.logical_draw_count; break;
-            case 4u: s.report.add_texture_game_draw_calls += batch.logical_draw_count; break;
-            default: ++s.report.unsupported_texture_function_game_draw_calls; break;
-            }
-            if (batch.draw.texture_double_color)
-                s.report.double_color_texture_game_draw_calls += batch.logical_draw_count;
-            if (batch.draw.texture_mipmap_enabled) {
-                s.report.mipmapped_game_draw_calls += batch.logical_draw_count;
-                if (batch.draw.texture_mipmap_linear)
-                    s.report.mip_linear_game_draw_calls += batch.logical_draw_count;
-            }
-        }
     }
 
     if (current_target != nullptr)
@@ -3696,12 +3448,8 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
             ID3D12CommandList *upload_lists[]{s.list.Get()};
             s.queue->ExecuteCommandLists(1u, upload_lists);
             frame.fence_value = s.next_fence++;
-            hr = s.queue->Signal(s.fence.Get(), frame.fence_value);
-            if (FAILED(hr))
-                runtime_log_error("dx12 ge", hr_text(hr, "ID3D12CommandQueue::Signal(upload-only)"));
+            (void)s.queue->Signal(s.fence.Get(), frame.fence_value);
             s.frame_cursor = (s.frame_cursor + 1u) % kFrameCount;
-        } else {
-            runtime_log_error("dx12 ge", hr_text(hr, "CommandList::Close(upload-only)"));
         }
         clear_accumulation(s);
         ++s.frame_epoch;
@@ -3711,7 +3459,6 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     display_target = find_framebuffer_target(s, s.display_framebuffer);
     const bool display_ready = touched_display && display_target != nullptr && display_target->color;
     if (!display_ready) {
-        ++s.report.frames_without_displayed_target;
         if (++s.missed_display_intervals > 4u) {
             s.direct_present_ok = false;
             s.presented_framebuffer = 0u;
@@ -3743,13 +3490,10 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     if (direct_possible && display_ready) {
         std::string present_error;
         recorded_present = record_direct_present(s, *display_target, present_decision, present_error);
-        if (!recorded_present && !present_error.empty())
-            runtime_log_error("dx12 ge direct present", present_error);
     }
 
     hr = s.list->Close();
     if (FAILED(hr)) {
-        runtime_log_error("dx12 ge", hr_text(hr, "CommandList::Close"));
         clear_accumulation(s);
         return false;
     }
@@ -3766,9 +3510,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
             s.direct_present_ok = true;
             s.presented_framebuffer = s.display_framebuffer;
             s.missed_display_intervals = 0u;
-            s.report.gpu_frame_presented_to_window = true;
         } else {
-            runtime_log_error("dx12 ge present", hr_text(hr, "IDXGISwapChain::Present"));
             s.direct_present_ok = false;
             s.presented_framebuffer = 0u;
         }
@@ -3777,15 +3519,12 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     frame.fence_value = s.next_fence++;
     hr = s.queue->Signal(s.fence.Get(), frame.fence_value);
     if (FAILED(hr)) {
-        runtime_log_error("dx12 ge", hr_text(hr, "ID3D12CommandQueue::Signal(frame)"));
         clear_accumulation(s);
         return false;
     }
 
     if (readback_now) {
-        if (!wait_for_fence(s, frame.fence_value, error)) {
-            runtime_log_error("dx12 ge readback wait", error);
-        } else {
+        if (wait_for_fence(s, frame.fence_value, error)) {
             void *mapped = nullptr;
             const D3D12_RANGE read_range{0u, static_cast<SIZE_T>(s.readback_bytes)};
             hr = s.readback_buffer->Map(0u, &read_range, &mapped);
@@ -3802,18 +3541,6 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
         }
     }
 
-    ++s.report.game_frames;
-    ++s.report.transfer_submissions;
-    s.report.transfer_bytes += bytes;
-    s.report.game_frame_vblank = vblank;
-    s.report.game_frame_readback_bytes = readback_now ? s.frame_rgba.size() : 0u;
-    s.report.presented_framebuffer_target = display_ready ? s.display_framebuffer : 0u;
-    s.report.release_candidate_ready = s.enabled && display_ready &&
-        (presented || s.readback_enabled) && s.report.transfer_self_test_passed &&
-        s.report.offscreen_self_test_passed && s.report.texture_descriptor_layout_created &&
-        s.report.depth_attachment_active && s.report.alpha_test_shader_active &&
-        s.report.observed_blend_modes_pipeline_active && s.report.fog_shader_active;
-    s.report.swapchain_active = s.swapchain != nullptr;
     clear_accumulation(s);
     s.frame_cursor = (s.frame_cursor + 1u) % kFrameCount;
     ++s.frame_epoch;
@@ -3845,20 +3572,23 @@ std::span<const std::byte> ge_gpu_backend_game_frame_rgba() noexcept {
 bool ge_gpu_backend_copy_offscreen_rgba(std::span<std::byte> destination) noexcept {
     return ge_gpu_backend_copy_game_frame_rgba(destination);
 }
-void ge_gpu_backend_mark_window_presented() noexcept { state().report.gpu_frame_presented_to_window = true; }
-GeGpuBackendReport ge_gpu_backend_report() { return state().report; }
+void ge_gpu_backend_mark_window_presented() noexcept {}
+GeGpuBackendReport ge_gpu_backend_report() {
+    const Dx12GeState &s = state();
+    GeGpuBackendReport report{};
+    report.offscreen_width = s.target_width;
+    report.offscreen_height = s.target_height;
+    return report;
+}
 
 #elif !defined(LCS_VULKAN_GE_BACKEND)
 
 namespace {
-struct Dx12StubState { GeGpuBackendReport report{}; std::uint32_t display_framebuffer{}; };
+struct Dx12StubState { std::uint32_t display_framebuffer{}; };
 Dx12StubState &state() { static Dx12StubState s; return s; }
 }
 bool initialize_ge_gpu_backend(std::string &error) {
     auto &s = state(); s = {};
-    s.report.requested = GeGpuBackendKind::DirectX12;
-    s.report.active = GeGpuBackendKind::Software;
-    s.report.message = "DirectX 12 GE backend is available only on Windows";
     error.clear(); return true;
 }
 void shutdown_ge_gpu_backend() noexcept { state() = {}; }
@@ -3899,17 +3629,8 @@ std::uint32_t ge_gpu_backend_display_framebuffer() noexcept { return state().dis
 std::span<const std::byte> ge_gpu_backend_game_frame_rgba() noexcept { return {}; }
 bool ge_gpu_backend_copy_offscreen_rgba(std::span<std::byte>) noexcept { return false; }
 void ge_gpu_backend_mark_window_presented() noexcept {}
-GeGpuBackendReport ge_gpu_backend_report() { return state().report; }
+GeGpuBackendReport ge_gpu_backend_report() { return {}; }
 
 #endif
-
-const char *ge_gpu_backend_name(GeGpuBackendKind kind) noexcept {
-    switch (kind) {
-    case GeGpuBackendKind::Software: return "software";
-    case GeGpuBackendKind::DirectX12: return "directx12";
-    case GeGpuBackendKind::Vulkan: return "vulkan";
-    }
-    return "unknown";
-}
 
 }

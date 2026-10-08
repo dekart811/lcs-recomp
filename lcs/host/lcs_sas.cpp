@@ -6,7 +6,6 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
-#include <iostream>
 #include <vector>
 
 namespace lcs {
@@ -100,32 +99,6 @@ struct SasState {
 };
 
 SasState sas_state{};
-std::uint64_t sas_core_mix_calls{};
-std::uint64_t sas_core_with_mix_calls{};
-
-bool sas_audio_diagnostics_enabled() {
-    static const bool enabled = std::getenv("PSPRECOMP_AUDIO_DIAG") != nullptr ||
-        std::getenv("PSPRECOMP_SAS_DIAG") != nullptr;
-    return enabled;
-}
-
-std::size_t sas_playing_voice_count() {
-    return static_cast<std::size_t>(std::count_if(
-        sas_state.voices.begin(), sas_state.voices.end(),
-        [](const SasVoiceState &voice) { return voice.playing && !voice.paused; }));
-}
-
-void sas_log_mix_checkpoint(const char *kind, std::uint64_t count) {
-    if (!sas_audio_diagnostics_enabled()) return;
-    if (count <= 8u || (count % 256u) == 0u) {
-        std::cerr << "[sas] " << kind << " call=" << count
-                  << " voices=" << sas_playing_voice_count()
-                  << " dry=" << sas_state.reverb.dry
-                  << " wet=" << sas_state.reverb.wet
-                  << " effect_type=" << sas_state.reverb.type
-                  << " grain=" << sas_state.grain_size << "\n";
-    }
-}
 
 constexpr std::uint32_t kSasErrorInvalidGrain = 0x80420001u;
 constexpr std::uint32_t kSasErrorInvalidMaxVoices = 0x80420002u;
@@ -670,8 +643,6 @@ void register_sas_hle(psprecomp::Runtime &runtime) {
                 ctx.set_gpr(2, kSasErrorInvalidSampleRate); return;
             }
             sas_state = SasState{};
-            sas_core_mix_calls = 0u;
-            sas_core_with_mix_calls = 0u;
             sas_state.initialized = true;
             sas_state.core_address = core;
             sas_state.grain_size = grain;
@@ -750,12 +721,6 @@ void register_sas_hle(psprecomp::Runtime &runtime) {
             }
             voice->left_volume = volumes[0]; voice->right_volume = volumes[1];
             voice->effect_left_volume = volumes[2]; voice->effect_right_volume = volumes[3];
-            if (sas_audio_diagnostics_enabled() &&
-                (volumes[2] != 0 || volumes[3] != 0)) {
-                std::cerr << "[sas] volume voice=" << static_cast<std::int32_t>(ctx.gpr[5])
-                          << " dry=" << volumes[0] << "," << volumes[1]
-                          << " effect=" << volumes[2] << "," << volumes[3] << "\n";
-            }
             set_success(ctx);
         });
 
@@ -838,11 +803,6 @@ void register_sas_hle(psprecomp::Runtime &runtime) {
             voice->envelope_phase = SasEnvelopePhase::Attack;
             voice->key_on_delay_samples = voice->adsr_configured
                 ? (voice->type == SasVoiceType::Vag ? 33u : 32u) : 0u;
-            if (sas_audio_diagnostics_enabled())
-                std::cerr << "[sas] keyon voice=" << static_cast<std::int32_t>(ctx.gpr[5])
-                          << " type=" << static_cast<int>(voice->type)
-                          << " pitch=" << voice->pitch
-                          << " loop=" << voice->loop << "\n";
             set_success(ctx);
         });
 
@@ -855,12 +815,6 @@ void register_sas_hle(psprecomp::Runtime &runtime) {
             }
             voice->on = false;
             voice->envelope_phase = SasEnvelopePhase::Release;
-            if (sas_audio_diagnostics_enabled())
-                std::cerr << "[sas] keyoff voice=" << static_cast<std::int32_t>(ctx.gpr[5])
-                          << " loop=" << voice->loop
-                          << " release_mode=" << voice->adsr_modes[3]
-                          << " release_rate=" << voice->adsr_rates[3]
-                          << " height=" << voice->envelope_height << "\n";
             set_success(ctx);
         });
 
@@ -945,8 +899,6 @@ void register_sas_hle(psprecomp::Runtime &runtime) {
             const std::size_t bytes = static_cast<std::size_t>(sas_state.grain_size) *
                 (sas_state.output_mode == 0u ? 4u : 8u);
             if (!rt.memory().contains(output, bytes)) { ctx.set_gpr(2, kSasErrorInvalidParameter); return; }
-            ++sas_core_mix_calls;
-            sas_log_mix_checkpoint("core", sas_core_mix_calls);
             if (sas_state.output_mode == 0u)
                 sas_mix_into(rt, output, sas_state.grain_size);
             else
@@ -966,8 +918,6 @@ void register_sas_hle(psprecomp::Runtime &runtime) {
             if (input_left > 0x1000u || input_right > 0x1000u) {
                 ctx.set_gpr(2, kSasErrorInvalidVolume); return;
             }
-            ++sas_core_with_mix_calls;
-            sas_log_mix_checkpoint("core-with-mix", sas_core_with_mix_calls);
             sas_mix_into(rt, inout, sas_state.grain_size, true, input_left, input_right);
             set_success(ctx);
         });

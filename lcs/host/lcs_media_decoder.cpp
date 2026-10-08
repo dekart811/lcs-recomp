@@ -258,7 +258,6 @@ struct PmfAudioDecoder::State {
     std::vector<std::uint8_t> stream;
     std::size_t cursor{};
     std::size_t frame_size{};
-    bool diag{};
     std::vector<std::uint8_t> pcm;
     std::size_t pcm_read{};
 
@@ -290,12 +289,8 @@ bool PmfAudioDecoder::open(const std::filesystem::path &path) {
     close();
     State &state = *state_;
     state.stream = extract_pmf_private_stream(path);
-    const bool diag = std::getenv("PSPRECOMP_MPEG_DIAG") != nullptr;
-    state.diag = diag;
-    if (diag) std::fprintf(stderr, "[pmf-audio] elementary=%zu bytes\n", state.stream.size());
     if (state.stream.empty()) return false;
     state.frame_size = measure_atrac3p_frame_size(state.stream);
-    if (diag) std::fprintf(stderr, "[pmf-audio] frame_size=%zu\n", state.frame_size);
     if (state.frame_size == 0u) return false;
     for (std::size_t i = 0u; i + 1u < state.stream.size(); ++i) {
         if (state.stream[i] == 0x0Fu && state.stream[i + 1u] == 0xD0u) { state.cursor = i; break; }
@@ -308,10 +303,7 @@ bool PmfAudioDecoder::open(const std::filesystem::path &path) {
     state.codec->sample_rate = 44100;
     state.codec->block_align = static_cast<int>(state.frame_size - kPmfFrameHeader);
     av_channel_layout_default(&state.codec->ch_layout, 2);
-    if (avcodec_open2(state.codec, decoder, nullptr) < 0) {
-        if (diag) std::fprintf(stderr, "[pmf-audio] avcodec_open2 failed\n");
-        return false;
-    }
+    if (avcodec_open2(state.codec, decoder, nullptr) < 0) return false;
     state.packet = av_packet_alloc();
     state.frame = av_frame_alloc();
     if (state.packet == nullptr || state.frame == nullptr) return false;
@@ -328,10 +320,7 @@ bool PmfAudioDecoder::open(const std::filesystem::path &path) {
                     payload_size, state.packet->data);
         const int sent = avcodec_send_packet(state.codec, state.packet);
         av_packet_unref(state.packet);
-        if (sent < 0) {
-            if (diag) std::fprintf(stderr, "[pmf-audio] send_packet=%d\n", sent);
-            continue;
-        }
+        if (sent < 0) continue;
         if (avcodec_receive_frame(state.codec, state.frame) < 0) continue;
         const int samples = state.frame->nb_samples;
         const auto *left = reinterpret_cast<const float *>(state.frame->data[0]);
@@ -347,7 +336,6 @@ bool PmfAudioDecoder::open(const std::filesystem::path &path) {
         }
         av_frame_unref(state.frame);
     }
-    if (diag) std::fprintf(stderr, "[pmf-audio] pcm=%zu bytes\n", state.pcm.size());
     state.pcm_read = 0u;
     return !state.pcm.empty();
 }

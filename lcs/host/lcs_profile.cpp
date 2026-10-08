@@ -24,8 +24,6 @@
 #include <deque>
 #include <functional>
 #include <mutex>
-#include <iomanip>
-#include <sstream>
 #include <thread>
 #include <cstdlib>
 #include <cstring>
@@ -277,14 +275,6 @@ const VirtualDiscFile *register_virtual_disc_file(const std::filesystem::path &p
     return &inserted->second;
 }
 
-struct DiscReadStats {
-    std::uint64_t bytes_from_files{};
-    std::uint64_t bytes_zero_filled{};
-    std::uint64_t zero_fill_events{};
-    std::uint64_t short_reads{};
-};
-DiscReadStats disc_read_stats;
-
 std::size_t read_virtual_disc(VirtualDiscHandle &handle, std::span<std::uint8_t> output) {
     if (handle.position >= handle.length || output.empty()) return 0u;
     const std::uint64_t available = handle.length - handle.position;
@@ -313,17 +303,6 @@ std::size_t read_virtual_disc(VirtualDiscHandle &handle, std::span<std::uint8_t>
             }
         }
 
-        if (file != nullptr && std::getenv("LCS_SKIP_MOVIES") != nullptr &&
-            file->native_path.extension() == ".PMF" &&
-            file->native_path.parent_path().filename() == "MOVIES") {
-            static bool reported = false;
-            if (!reported) {
-                reported = true;
-                std::cerr << "[io] suppressing movie sectors for \""
-                          << file->native_path.filename().string() << "\"\n";
-            }
-            break;
-        }
         if (file != nullptr) {
             const std::uint64_t file_start = static_cast<std::uint64_t>(file->start_sector) * 2048u;
             const std::uint64_t file_offset = absolute - file_start;
@@ -336,11 +315,7 @@ std::size_t read_virtual_disc(VirtualDiscHandle &handle, std::span<std::uint8_t>
                        static_cast<std::streamsize>(chunk));
             const auto actual = static_cast<std::size_t>(input.gcount());
             written += actual;
-            disc_read_stats.bytes_from_files += actual;
-            if (actual != chunk) {
-                ++disc_read_stats.short_reads;
-                break;
-            }
+            if (actual != chunk) break;
             continue;
         }
 
@@ -351,8 +326,6 @@ std::size_t read_virtual_disc(VirtualDiscHandle &handle, std::span<std::uint8_t>
         const std::size_t filled = static_cast<std::size_t>(
             std::min<std::uint64_t>(requested - written, zero_end - absolute));
         written += filled;
-        disc_read_stats.bytes_zero_filled += filled;
-        ++disc_read_stats.zero_fill_events;
     }
 
     handle.position += written;
@@ -395,8 +368,6 @@ struct AudioChannelState {
 };
 
 std::array<AudioChannelState, 8> audio_channels{};
-
-std::uint32_t mpeg_read_thread_args = 0u;
 
 struct MpegStreamState {
     std::uint32_t type{};
@@ -532,10 +503,6 @@ bool open_video_decoder(MpegContextState &state) {
         return false;
     if (!state.video.open(state.source_path)) return false;
     state.video_eof = false;
-    if (std::getenv("LCS_MPEG_DIAG") != nullptr) {
-        std::cerr << "[mpeg] decoder opened \"" << state.source_path.string() << "\" "
-                  << state.header.width << "x" << state.header.height << "\n";
-    }
     return true;
 }
 
@@ -549,8 +516,6 @@ bool read_video_frame(MpegContextState &state, std::span<std::uint8_t> frame) {
 }
 
 std::uint32_t mpeg_au_limit(const MpegContextState &state) {
-    if (const char *text = std::getenv("LCS_MPEG_AU_LIMIT"); text != nullptr && *text != '\0')
-        return static_cast<std::uint32_t>(std::strtoul(text, nullptr, 0));
     if (state.analyzed && state.header.last_timestamp > state.header.first_timestamp) {
         return static_cast<std::uint32_t>(
             (state.header.last_timestamp - state.header.first_timestamp) / 3003u) + 1u;
@@ -596,12 +561,6 @@ struct AtracContextState {
 };
 
 std::array<AtracContextState, 6> atrac_contexts{};
-
-bool atrac_diag_enabled() {
-    static const bool enabled = std::getenv("LCS_ATRAC_DIAG") != nullptr ||
-        std::getenv("PSPRECOMP_ATRAC_DIAG") != nullptr;
-    return enabled;
-}
 
 std::uint16_t read_le16(std::span<const std::uint8_t> bytes, std::size_t offset) {
     return static_cast<std::uint16_t>(bytes[offset]) |
@@ -724,9 +683,6 @@ bool open_atrac_decoder(AtracContextState &state) {
                             kAtracOutputChannels, seek))
         return false;
     state.decoder_eof = false;
-    if (atrac_diag_enabled())
-        std::cerr << "[atrac] decoder opened source=\"" << state.source_path.string()
-                  << "\" sample=" << state.sample_position << "\n";
     return true;
 }
 
@@ -1134,13 +1090,8 @@ bool event_flag_matches(const EventFlagRecord &flag, std::uint32_t requested, st
 void consume_event_flag(EventFlagRecord &flag, std::uint32_t requested, std::uint32_t mode);
 
 void maybe_rearm_umd_stream_flag() {
-    if (std::getenv("LCS_NO_REARM") != nullptr) return;
-    static const std::uint64_t rearm_interval_us = [] {
-        const char *text = std::getenv("LCS_REARM_US");
-        if (text == nullptr || *text == '\0') return std::uint64_t{5000u};
-        return static_cast<std::uint64_t>(std::strtoull(text, nullptr, 0));
-    }();
-    if (virtual_time_us - umd_stream_flag_last_rearm_us < rearm_interval_us) return;
+    constexpr std::uint64_t kRearmIntervalUs = 5000u;
+    if (virtual_time_us - umd_stream_flag_last_rearm_us < kRearmIntervalUs) return;
     for (auto &[uid, flag] : event_flag_table.flags) {
         if (flag.name != "UmdStreamEventFlag") continue;
         umd_stream_flag_last_rearm_us = virtual_time_us;
@@ -1218,27 +1169,8 @@ void promote_expired_delays() {
     }
 }
 
-bool speed_diag_enabled() {
-    static const bool enabled = std::getenv("PSPRECOMP_REALTIME_SPEED_DIAG") != nullptr;
-    return enabled;
-}
-
-std::unordered_map<std::int32_t, std::uint64_t> g_speed_thread_ns;
-std::chrono::steady_clock::time_point g_speed_thread_mark{};
-
-void note_thread_switch() {
-    if (!speed_diag_enabled()) return;
-    const auto now = std::chrono::steady_clock::now();
-    if (g_speed_thread_mark.time_since_epoch().count() != 0) {
-        g_speed_thread_ns[thread_table.current_uid] += static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(now - g_speed_thread_mark).count());
-    }
-    g_speed_thread_mark = now;
-}
-
 bool activate_next_thread(psprecomp::AllegrexContext &ctx, const char *reason) {
     (void)reason;
-    note_thread_switch();
     maybe_rearm_umd_stream_flag();
     promote_expired_delays();
     thread_table.continuations.erase(
@@ -1440,14 +1372,6 @@ void wake_thread_end_waiters(std::int32_t completed_uid, std::uint32_t result = 
 
 void complete_current_thread(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
     const std::int32_t completed_uid = thread_table.current_uid;
-    if (std::getenv("LCS_THREAD_DIAG") != nullptr) {
-        const auto found = thread_table.threads.find(completed_uid);
-        std::cerr << "[thread] exit uid=" << completed_uid << " name=\""
-                  << (found != thread_table.threads.end() ? found->second.name : std::string("?"))
-                  << "\" t=" << virtual_time_us << " vblank=" << display_vblank_index
-                  << " v0=" << psprecomp::hex32(ctx.gpr[2]) << " a0=" << psprecomp::hex32(ctx.gpr[4])
-                  << " ra=" << psprecomp::hex32(ctx.gpr[31]) << "\n";
-    }
     if (auto current = thread_table.threads.find(completed_uid); current != thread_table.threads.end())
         current->second.state = ThreadState::Completed;
     thread_table.continuations.erase(
@@ -1470,7 +1394,6 @@ bool dispatch_vblank_interrupt(psprecomp::Runtime &rt, psprecomp::AllegrexContex
                                std::uint32_t delay_us);
 bool dispatch_vblank_interrupt_if_due(psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx,
                                       std::uint32_t delay_us);
-void hang_trace(const std::string &line);
 
 void lcs_callback_return(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
     const std::int32_t uid = thread_table.current_uid;
@@ -1497,8 +1420,6 @@ void lcs_callback_return(psprecomp::Runtime &runtime, psprecomp::AllegrexContext
     }
     if (frame.kind == AsyncReturnKind::MpegRingbuffer) {
         const auto produced = static_cast<std::int32_t>(ctx.gpr[2]);
-        if (std::getenv("LCS_MPEG_DIAG") != nullptr)
-            std::cerr << "[mpeg] ring callback returned " << produced << "\n";
         auto &memory = runtime.memory();
         if (produced > 0 && memory.contains(frame.ring, 48u)) {
             const std::int32_t packets = static_cast<std::int32_t>(memory.load32(frame.ring));
@@ -1534,9 +1455,6 @@ bool deliver_pending_ge_callback(psprecomp::AllegrexContext &ctx, std::uint32_t 
     frame.delay_us = delay_us;
     frame.vblank_wait = vblank_wait;
     frames.push_back(frame);
-    hang_trace("ge-callback fn=" + psprecomp::hex32(callback.function) +
-               " finish_arg=" + std::to_string(callback.finish_argument) +
-               " vblank_wait=" + std::to_string(vblank_wait ? 1 : 0));
     ctx.set_gpr(4, callback.finish_argument);
     ctx.set_gpr(5, callback.user_argument);
     ctx.set_gpr(31, 0x00000004u);
@@ -1546,11 +1464,6 @@ bool deliver_pending_ge_callback(psprecomp::AllegrexContext &ctx, std::uint32_t 
 
 std::uint64_t g_vblank_interrupt_due_us = 0u;
 
-bool vblank_interrupt_enabled() {
-    static const bool enabled = std::getenv("LCS_NO_VBLANK_INTERRUPT") == nullptr;
-    return enabled;
-}
-
 bool in_vblank_interrupt() {
     const auto found = async_return_frames.find(thread_table.current_uid);
     return found != async_return_frames.end() && !found->second.empty() &&
@@ -1559,7 +1472,6 @@ bool in_vblank_interrupt() {
 
 bool dispatch_vblank_interrupt(psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx,
                                std::uint32_t delay_us) {
-    if (!vblank_interrupt_enabled()) return false;
     const auto interrupt = sub_interrupts.find(sub_interrupt_key(30u, 15u));
     if (interrupt == sub_interrupts.end() || !interrupt->second.enabled ||
         interrupt->second.handler == 0u)
@@ -1584,8 +1496,6 @@ bool dispatch_vblank_interrupt(psprecomp::Runtime &rt, psprecomp::AllegrexContex
     current->second.delay_until_us = virtual_time_us + delay_us;
     current->second.delay_sequence = thread_table.next_delay_sequence++;
     g_vblank_interrupt_due_us = virtual_time_us + delay_us + kVblankPeriodUs;
-    hang_trace("vblank-interrupt delay=" + std::to_string(delay_us) +
-               " resume=" + psprecomp::hex32(frame.resume.pc));
     if (!activate_next_thread(ctx, "vblank-interrupt"))
         rt.stop("PSP scheduler deadlock while waiting for the VBlank interrupt");
     return true;
@@ -1593,8 +1503,7 @@ bool dispatch_vblank_interrupt(psprecomp::Runtime &rt, psprecomp::AllegrexContex
 
 bool dispatch_vblank_interrupt_if_due(psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx,
                                       std::uint32_t delay_us) {
-    static const bool disabled = std::getenv("LCS_NO_DELAY_VBLANK") != nullptr;
-    if (disabled || virtual_time_us + delay_us < g_vblank_interrupt_due_us) return false;
+    if (virtual_time_us + delay_us < g_vblank_interrupt_due_us) return false;
     return dispatch_vblank_interrupt(rt, ctx, delay_us);
 }
 
@@ -1664,10 +1573,6 @@ void lcs_post_dispatch_hook(psprecomp::Runtime &, psprecomp::AllegrexContext &,
         const auto worker = thread_table.threads.find(worker_uid);
         if (worker != thread_table.threads.end() &&
             worker->second.state == ThreadState::IoDeferred) {
-            if (std::getenv("LCS_IO_HANDOFF_DIAG") != nullptr) {
-                std::cerr << "[io-handoff] release worker=" << worker_uid
-                          << " release_pc=" << psprecomp::hex32(dispatch_pc) << "\n";
-            }
             enqueue_continuation(worker_uid, worker->second.suspended_context);
         }
         deferred_io_resumes.erase(worker_uid);
@@ -1702,62 +1607,7 @@ bool defer_current_thread_for_io_handoff(psprecomp::AllegrexContext &ctx,
     deferred_io_resumes[worker_uid] =
         DeferredIoResume{thread_table.current_uid, ctx.pc, ctx.pc};
     refresh_lcs_post_dispatch_hook();
-    if (std::getenv("LCS_IO_HANDOFF_DIAG") != nullptr) {
-        std::cerr << "[io-handoff] arm worker=" << worker_uid
-                  << " submitter=" << thread_table.current_uid
-                  << " release_pc=" << psprecomp::hex32(ctx.pc) << "\n";
-    }
     return true;
-}
-
-void dump_ram_if_requested(const psprecomp::GuestMemory &memory) {
-    struct Config {
-        std::filesystem::path directory;
-        std::uint64_t start{};
-        std::uint64_t end{};
-        std::uint64_t interval{1u};
-        bool dump_vram{};
-        bool enabled{};
-    };
-    static const auto parse_u64 = [](const char *name, std::uint64_t fallback) {
-        const char *text = std::getenv(name);
-        if (text == nullptr || *text == '\0') return fallback;
-        return static_cast<std::uint64_t>(std::strtoull(text, nullptr, 0));
-    };
-    static const Config config = [] {
-        Config value{};
-        const char *directory = std::getenv("PSPRECOMP_RAM_DUMP_DIR");
-        if (directory == nullptr || *directory == '\0') return value;
-        value.directory = directory;
-        value.start = parse_u64("PSPRECOMP_RAM_DUMP_START_VBLANK", 0u);
-        value.end = parse_u64("PSPRECOMP_RAM_DUMP_END_VBLANK", value.start);
-        value.interval = std::max<std::uint64_t>(1u, parse_u64("PSPRECOMP_RAM_DUMP_INTERVAL", 1u));
-        value.dump_vram = parse_u64("PSPRECOMP_RAM_DUMP_VRAM", 0u) != 0u;
-        value.enabled = true;
-        return value;
-    }();
-    if (!config.enabled || display_vblank_index < config.start ||
-        display_vblank_index > config.end ||
-        ((display_vblank_index - config.start) % config.interval) != 0u) {
-        return;
-    }
-
-    std::filesystem::create_directories(config.directory);
-    std::ostringstream stem;
-    stem << "ram_vblank_" << std::setw(6) << std::setfill('0') << display_vblank_index;
-    const auto write_bytes = [](const std::filesystem::path &path,
-                                const std::vector<std::uint8_t> &bytes) {
-        std::ofstream output(path, std::ios::binary | std::ios::trunc);
-        if (!output) return;
-        output.write(reinterpret_cast<const char *>(bytes.data()),
-                     static_cast<std::streamsize>(bytes.size()));
-    };
-    const std::filesystem::path ram_path = config.directory / (stem.str() + ".bin");
-    write_bytes(ram_path, memory.bytes());
-    if (config.dump_vram)
-        write_bytes(config.directory / (stem.str() + ".vram.bin"), memory.vram_bytes());
-    std::cerr << "[ram-dump] vblank=" << display_vblank_index << " path=" << ram_path.string()
-              << " bytes=" << memory.bytes().size() << "\n";
 }
 
 std::uint64_t starvation_tick_microseconds = 1u;
@@ -1768,7 +1618,6 @@ std::chrono::steady_clock::time_point wall_clock_start;
 std::uint32_t throttle_vblank_to_real_time() {
     static const bool uncapped = std::getenv("LCS_UNCAPPED") != nullptr;
     if (uncapped) return 0u;
-    static const bool skip_time = std::getenv("LCS_NO_VBLANK_SKIP") == nullptr;
     constexpr std::uint32_t kMaxSkippedVblanks = 6u;
     static std::chrono::steady_clock::time_point next_vblank{};
     const auto period = std::chrono::microseconds(kVblankPeriodUs);
@@ -1782,20 +1631,11 @@ std::uint32_t throttle_vblank_to_real_time() {
         next_vblank += period;
         return 0u;
     }
-    if (!skip_time) {
-        next_vblank = now > next_vblank + period * 8 ? now + period : next_vblank + period;
-        return 0u;
-    }
     const auto behind = static_cast<std::uint64_t>((now - next_vblank) / period);
     const auto skipped = static_cast<std::uint32_t>(std::min<std::uint64_t>(behind, kMaxSkippedVblanks));
     next_vblank = behind > kMaxSkippedVblanks ? now + period : next_vblank + period * (skipped + 1u);
     return skipped;
 }
-
-std::atomic<std::uint64_t> g_speed_ge_list_ns{};
-std::atomic<std::uint64_t> g_speed_gpu_finish_ns{};
-std::atomic<std::uint64_t> g_speed_throttle_ns{};
-std::atomic<std::uint64_t> g_speed_ge_wait_ns{};
 
 struct GeWorker {
     std::mutex mutex;
@@ -1858,10 +1698,7 @@ void ge_worker_wait_idle() {
     std::unique_lock lock(ge_worker.mutex);
     if (!ge_worker.started) return;
     if (ge_worker.tasks.empty() && !ge_worker.busy) return;
-    const auto started = std::chrono::steady_clock::now();
     ge_worker.cv.wait(lock, [] { return ge_worker.tasks.empty() && !ge_worker.busy; });
-    g_speed_ge_wait_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now() - started).count());
 }
 
 void ge_worker_stop() {
@@ -1922,13 +1759,8 @@ void cap_frame_rate(std::uint32_t list_address) {
 bool g_ge_list_since_finish = false;
 std::uint32_t g_ge_last_list_address = 0u;
 
-bool ge_frame_split_enabled() {
-    static const bool enabled = std::getenv("LCS_GE_NO_FRAME_SPLIT") == nullptr;
-    return enabled;
-}
-
 void execute_ge_list_frame(psprecomp::Runtime &rt, std::uint32_t list_address, std::uint64_t vblank) {
-    if (ge_frame_split_enabled() && g_ge_list_since_finish && list_address != g_ge_last_list_address) {
+    if (g_ge_list_since_finish && list_address != g_ge_last_list_address) {
         // Not the image the window keeps.
         ge_finish_shows_this_frame() = false;
         (void)ge_gpu_backend_finish_color_frame(vblank);
@@ -1939,47 +1771,15 @@ void execute_ge_list_frame(psprecomp::Runtime &rt, std::uint32_t list_address, s
     g_ge_last_list_address = list_address;
 }
 
-void report_timestep(psprecomp::Runtime &rt) {
-    static const bool enabled = std::getenv("LCS_TIMESTEP_DIAG") != nullptr;
-    if (!enabled || !rt.memory().contains(0x08B5E030u, 4u)) return;
-    static auto window_start = std::chrono::steady_clock::now();
-    static double timestep_sum = 0.0;
-    static std::uint32_t frames = 0u;
-    timestep_sum += std::bit_cast<float>(rt.memory().load32(0x08B5E030u));
-    ++frames;
-    const auto now = std::chrono::steady_clock::now();
-    const double seconds = std::chrono::duration<double>(now - window_start).count();
-    if (seconds < 1.0) return;
-    std::cerr << "[timestep] fps=" << frames / seconds
-              << " avg=" << timestep_sum / frames
-              << " per_second=" << timestep_sum / seconds << " (50 = real time)\n";
-    window_start = now;
-    timestep_sum = 0.0;
-    frames = 0u;
-}
-
 void present_frame(psprecomp::Runtime &rt, const PresentRequest &request) {
-    report_timestep(rt);
     std::uint32_t present_buffer = request.display_buffer;
     std::uint32_t present_stride = request.display_stride;
-    static const bool keep_display_buffer =
-        std::getenv("LCS_NO_PRESENT_RENDER_TARGET") != nullptr;
     const std::uint32_t render_target = rendered_render_target();
     const std::uint32_t render_stride = rendered_render_stride();
-    if (!keep_display_buffer && render_target != 0u && render_stride != 0u &&
+    if (render_target != 0u && render_stride != 0u &&
         render_target != request.display_buffer) {
         present_buffer = render_target;
         present_stride = render_stride;
-    }
-    if (std::getenv("LCS_PRESENT_DIAG") != nullptr) {
-        static std::uint32_t reported = 0u;
-        if (reported != present_buffer) {
-            reported = present_buffer;
-            std::cerr << "[present] buffer=" << psprecomp::hex32(present_buffer)
-                      << " stride=" << present_stride
-                      << " display_fb=" << psprecomp::hex32(request.display_buffer)
-                      << " render_target=" << psprecomp::hex32(render_target) << "\n";
-        }
     }
     std::uint32_t present_width = request.display_width;
     std::uint32_t present_height = request.display_height;
@@ -1991,11 +1791,8 @@ void present_frame(psprecomp::Runtime &rt, const PresentRequest &request) {
     }
     ge_gpu_backend_set_display_framebuffer(present_buffer, present_width, present_height);
     fps_overlay_render_frame(present_buffer, present_width, present_height);
-    const auto finish_started = std::chrono::steady_clock::now();
     const bool gpu_frame_ready = ge_gpu_backend_finish_color_frame(request.vblank);
     g_ge_list_since_finish = false;
-    g_speed_gpu_finish_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now() - finish_started).count());
     static std::uint64_t vblanks_since_gpu_frame = 0u;
     static bool holding_gpu_frame = false;
     if (gpu_frame_ready) {
@@ -2003,8 +1800,6 @@ void present_frame(psprecomp::Runtime &rt, const PresentRequest &request) {
         vblanks_since_gpu_frame = 0u;
     } else if (holding_gpu_frame && ++vblanks_since_gpu_frame > 4u) {
         holding_gpu_frame = false;
-        std::cerr << "[present] gpu frame stopped, falling back to the guest buffer"
-                  << " vblank=" << request.vblank << '\n';
     }
 
     bool presented_gpu_frame = false;
@@ -2024,120 +1819,10 @@ void present_frame(psprecomp::Runtime &rt, const PresentRequest &request) {
             presented_gpu_frame = true;
         }
     }
-    if (std::getenv("LCS_PRESENT_DIAG") != nullptr) {
-        static std::uint64_t gpu_presents = 0u, software_presents = 0u;
-        if (presented_gpu_frame) ++gpu_presents; else ++software_presents;
-        if (((gpu_presents + software_presents) % 120u) == 0u) {
-            const std::span<const std::byte> frame = ge_gpu_backend_game_frame_rgba();
-            std::size_t non_black = 0u;
-            for (std::size_t index = 0u; index + 3u < frame.size(); index += 4u) {
-                if (frame[index] != std::byte{0} || frame[index + 1u] != std::byte{0} ||
-                    frame[index + 2u] != std::byte{0})
-                    ++non_black;
-            }
-            std::cerr << "[present] gpu=" << gpu_presents
-                      << " software=" << software_presents
-                      << " direct=" << ge_gpu_backend_presents_directly()
-                      << " readback_bytes=" << frame.size()
-                      << " non_black=" << non_black << "\n";
-        }
-    }
     if (!presented_gpu_frame) {
-        static std::uint64_t missed = 0u;
-        ++missed;
-        if (missed <= 5u || (missed % 300u) == 0u) {
-            std::cerr << "[present] no gpu frame shown"
-                      << " missed=" << missed
-                      << " ready=" << gpu_frame_ready
-                      << " holding=" << holding_gpu_frame
-                      << " vblank=" << request.vblank << '\n';
-        }
         display_window_present(rt, present_buffer, present_stride, request.pixel_format,
                                present_width, present_height);
     }
-}
-
-void report_realtime_speed_if_requested(const psprecomp::Runtime &runtime, std::uint64_t vblank_index) {
-    if (!speed_diag_enabled()) return;
-    static const std::uint64_t interval = [] {
-        const char *text = std::getenv("PSPRECOMP_REALTIME_SPEED_INTERVAL");
-        const unsigned long long parsed = text != nullptr ? std::strtoull(text, nullptr, 10) : 0ull;
-        return parsed == 0ull ? std::uint64_t{120u} : static_cast<std::uint64_t>(parsed);
-    }();
-    static std::chrono::steady_clock::time_point host_start{};
-    static std::uint64_t guest_start{};
-    static std::uint64_t vblank_start{};
-    static bool started = false;
-    const auto now = std::chrono::steady_clock::now();
-    if (!started) {
-        host_start = now;
-        guest_start = virtual_time_us;
-        vblank_start = vblank_index;
-        started = true;
-        return;
-    }
-    const std::uint64_t vblanks = vblank_index - vblank_start;
-    if (vblanks < interval) return;
-    const double host_us = static_cast<double>(std::max<std::int64_t>(1,
-        std::chrono::duration_cast<std::chrono::microseconds>(now - host_start).count()));
-    const double guest_us = static_cast<double>(virtual_time_us - guest_start);
-    const GeListSplitNs list_split = take_ge_list_split();
-    const double vblank_count = static_cast<double>(vblanks);
-    std::ostringstream line;
-    line << std::fixed << std::setprecision(1)
-         << "[realtime-speed] vblank=" << vblank_index
-         << " host_ms_per_vblank=" << host_us / vblank_count / 1000.0
-         << " emulation_speed_percent=" << guest_us * 100.0 / host_us
-         << " ge_list_ms=" << static_cast<double>(g_speed_ge_list_ns) / 1e6 / vblank_count
-         << " gpu_finish_ms=" << static_cast<double>(g_speed_gpu_finish_ns) / 1e6 / vblank_count
-         << " throttle_ms=" << static_cast<double>(g_speed_throttle_ns) / 1e6 / vblank_count
-         << " ge_wait_ms=" << static_cast<double>(g_speed_ge_wait_ns) / 1e6 / vblank_count
-         << " vertex_ms=" << static_cast<double>(list_split.vertex_ns) / 1e6 / vblank_count
-         << " vertex_reuse_pct=" << (list_split.vertex_reused + list_split.vertex_decoded == 0u
-                ? 0.0
-                : static_cast<double>(list_split.vertex_reused) * 100.0 /
-                      static_cast<double>(list_split.vertex_reused + list_split.vertex_decoded))
-         << " tex_hash_ms=" << static_cast<double>(list_split.tex_hash_ns) / 1e6 / vblank_count
-         << " tex_decode_ms=" << static_cast<double>(list_split.tex_decode_ns) / 1e6 / vblank_count
-         << " vertex_copy_ms=" << static_cast<double>(list_split.vertex_copy_ns) / 1e6 / vblank_count
-         << "\n";
-
-    note_thread_switch();
-    std::vector<std::pair<std::int32_t, std::uint64_t>> threads(g_speed_thread_ns.begin(), g_speed_thread_ns.end());
-    std::sort(threads.begin(), threads.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
-    line << "  threads:";
-    for (std::size_t i = 0; i < threads.size() && i < 6u; ++i) {
-        const auto found = thread_table.threads.find(threads[i].first);
-        const std::string name = found != thread_table.threads.end() ? found->second.name : "?";
-        line << " [" << threads[i].first << " " << name << " "
-             << static_cast<double>(threads[i].second) / 1000.0 * 100.0 / host_us << "%]";
-    }
-    line << "\n";
-    g_speed_thread_ns.clear();
-
-    static std::unordered_map<std::string, std::uint64_t> previous_hle;
-    const auto hle = runtime.hle_histogram();
-    if (!hle.empty()) {
-        std::vector<std::pair<std::string, std::uint64_t>> delta;
-        for (const auto &[key, count] : hle) {
-            const std::uint64_t before = previous_hle[key];
-            if (count > before) delta.emplace_back(key, count - before);
-            previous_hle[key] = count;
-        }
-        std::sort(delta.begin(), delta.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
-        line << "  hle_per_vblank:";
-        for (std::size_t i = 0; i < delta.size() && i < 6u; ++i)
-            line << " [" << delta[i].first << " " << static_cast<double>(delta[i].second) / static_cast<double>(vblanks) << "]";
-        line << "\n";
-    }
-    std::cerr << line.str();
-    g_speed_ge_list_ns = 0u;
-    g_speed_gpu_finish_ns = 0u;
-    g_speed_throttle_ns = 0u;
-    g_speed_ge_wait_ns = 0u;
-    host_start = now;
-    guest_start = virtual_time_us;
-    vblank_start = vblank_index;
 }
 
 void check_wall_clock_limit(psprecomp::Runtime &runtime, std::uint64_t sample_mask) {
@@ -2156,47 +1841,6 @@ void lcs_starvation_tick(psprecomp::Runtime &starvation_runtime, psprecomp::Alle
 
     check_wall_clock_limit(starvation_runtime, 0xFFFu);
 
-    if (mpeg_read_thread_args != 0u && std::getenv("LCS_MPEG_FINISH") != nullptr) {
-        auto &memory = starvation_runtime.memory();
-        if (memory.contains(mpeg_read_thread_args + 0xCu, 4u)) {
-            const std::uint32_t status_pointer = memory.load32(mpeg_read_thread_args + 0xCu);
-            if (status_pointer != 0u && memory.contains(status_pointer, 4u) &&
-                memory.load32(status_pointer) != 0xFFu) {
-                memory.store32(status_pointer, 0xFFu);
-                std::cerr << "[mpeg] marked video finished at "
-                          << psprecomp::hex32(status_pointer) << "\n";
-            }
-        }
-    }
-
-    if (std::getenv("LCS_MAIN_DIAG") != nullptr) {
-        static std::uint64_t samples = 0u;
-        if ((++samples % 20000u) == 0u) {
-            const auto main_thread = thread_table.threads.find(3);
-            if (main_thread != thread_table.threads.end()) {
-                std::cerr << "[main] t=" << virtual_time_us
-                          << " state=" << static_cast<int>(main_thread->second.state)
-                          << " delay_until=" << main_thread->second.delay_until_us
-                          << " pc=" << psprecomp::hex32(main_thread->second.suspended_context.pc)
-                          << " current=" << thread_table.current_uid
-                          << " ready=" << thread_table.continuations.size();
-                auto &memory = starvation_runtime.memory();
-                if (memory.contains(0x08B5D16Cu, 4u)) {
-                    const std::uint32_t manager = memory.load32(0x08B5D16Cu);
-                    std::cerr << " mgr=" << psprecomp::hex32(manager);
-                    if (manager != 0u && memory.contains(manager + 0xD04u, 4u)) {
-                        const std::uint32_t head = memory.load32(manager + 0xCFCu);
-                        std::cerr << " queue_head=" << psprecomp::hex32(head)
-                                  << " sentinel=" << psprecomp::hex32(manager + 0xCFCu)
-                                  << " empty=" << (head == manager + 0xCFCu ? 1 : 0)
-                                  << " busy=" << psprecomp::hex32(memory.load32(manager + 0xD04u));
-                    }
-                }
-                std::cerr << "\n";
-            }
-        }
-    }
-
     const auto current = thread_table.threads.find(thread_table.current_uid);
     if (current == thread_table.threads.end() || current->second.state != ThreadState::Running) return;
     const auto best = best_ready_thread();
@@ -2205,65 +1849,6 @@ void lcs_starvation_tick(psprecomp::Runtime &starvation_runtime, psprecomp::Alle
 
     enqueue_continuation(thread_table.current_uid, ctx);
     (void)activate_next_thread(ctx, "timer-preempt");
-}
-
-std::unordered_map<std::uint32_t, std::uint64_t> pc_profile;
-std::unordered_map<std::uint64_t, std::uint64_t> pc_profile_callers;
-
-std::uint32_t g_hang_trace_lines = 0u;
-
-bool hang_trace_active() {
-    return g_hang_trace_lines != 0u && g_hang_trace_lines < 600u;
-}
-
-void hang_trace(const std::string &line) {
-    if (!hang_trace_active()) return;
-    ++g_hang_trace_lines;
-    std::cerr << "[hang] t=" << virtual_time_us << " vblank=" << display_vblank_index
-              << " uid=" << thread_table.current_uid << " " << line << "\n";
-}
-
-void reset_pc_profile_on_key() {
-    if (pc_profile.empty() && pc_profile_callers.empty()) return;
-    if (!display_window_profile_key_pressed()) return;
-    pc_profile.clear();
-    pc_profile_callers.clear();
-    g_hang_trace_lines = 1u;
-    std::cerr << "[lcs-profile] reset at vblank " << display_vblank_index << "\n";
-}
-
-std::vector<std::uint32_t> parse_address_list(const char *text) {
-    std::vector<std::uint32_t> result;
-    if (text == nullptr) return result;
-    std::stringstream stream(text);
-    std::string item;
-    while (std::getline(stream, item, ',')) {
-        if (item.empty()) continue;
-        result.push_back(static_cast<std::uint32_t>(std::strtoul(item.c_str(), nullptr, 0)));
-    }
-    return result;
-}
-
-void lcs_pc_profile_hook(psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx,
-                         std::uint32_t target_pc, std::uint32_t) {
-    ++pc_profile[target_pc];
-    ++pc_profile_callers[(static_cast<std::uint64_t>(target_pc) << 32u) | ctx.gpr[31]];
-    static const std::vector<std::uint32_t> traced =
-        parse_address_list(std::getenv("LCS_PC_TRACE"));
-    if (std::find(traced.begin(), traced.end(), target_pc) == traced.end()) return;
-    std::cerr << "[lcs-trace] " << psprecomp::hex32(target_pc)
-              << " uid=" << thread_table.current_uid
-              << " t=" << virtual_time_us
-              << " ra=" << psprecomp::hex32(ctx.gpr[31])
-              << " s4=" << psprecomp::hex32(ctx.gpr[20])
-              << " s5=" << psprecomp::hex32(ctx.gpr[21])
-              << " s6=" << psprecomp::hex32(ctx.gpr[22]);
-    for (const std::uint32_t address : parse_address_list(std::getenv("LCS_MEM_WATCH"))) {
-        if (!rt.memory().contains(address, 4u)) continue;
-        std::cerr << " [" << psprecomp::hex32(address) << "]="
-                  << static_cast<std::int32_t>(rt.memory().load32(address));
-    }
-    std::cerr << "\n";
 }
 
 }
@@ -2275,128 +1860,6 @@ void set_wall_clock_limit(double seconds) {
 
 void ge_worker_shutdown() {
     ge_worker_stop();
-}
-
-void dump_disc_read_stats() {
-    const std::uint64_t total =
-        disc_read_stats.bytes_from_files + disc_read_stats.bytes_zero_filled;
-    if (total == 0u) return;
-    std::cerr << "[disc-read] from_files=" << disc_read_stats.bytes_from_files
-              << " zero_filled=" << disc_read_stats.bytes_zero_filled
-              << " zero_fill_events=" << disc_read_stats.zero_fill_events
-              << " short_reads=" << disc_read_stats.short_reads
-              << " zero_percent="
-              << (static_cast<double>(disc_read_stats.bytes_zero_filled) * 100.0 /
-                  static_cast<double>(total))
-              << " registered_files=" << file_table.virtual_files_by_path.size() << "\n";
-}
-
-void dump_watched_memory(psprecomp::Runtime &runtime) {
-    const char *text = std::getenv("LCS_MEM_WATCH");
-    if (text == nullptr || *text == '\0') return;
-    std::stringstream stream(text);
-    std::string item;
-    while (std::getline(stream, item, ',')) {
-        if (item.empty()) continue;
-        const auto address = static_cast<std::uint32_t>(std::strtoul(item.c_str(), nullptr, 0));
-        if (!runtime.memory().contains(address, 4u)) {
-            std::cerr << "[lcs-mem] " << psprecomp::hex32(address) << " unmapped\n";
-            continue;
-        }
-        const std::uint32_t value = runtime.memory().load32(address);
-        std::cerr << "[lcs-mem] " << psprecomp::hex32(address) << " = "
-                  << psprecomp::hex32(value) << " (" << static_cast<std::int32_t>(value) << ")\n";
-    }
-}
-
-void dump_framebuffer_stats(psprecomp::Runtime &runtime) {
-    for (const std::uint32_t probe : {0x04000000u, 0x04088000u, 0x04178000u}) {
-        std::uint64_t probe_non_black = 0u;
-        std::map<std::uint32_t, std::uint64_t> probe_colors;
-        for (std::uint32_t y = 0; y < 272u; ++y) {
-            for (std::uint32_t x = 0; x < 480u; ++x) {
-                const std::uint32_t address = probe + (y * 512u + x) * 4u;
-                if (!runtime.memory().contains(address, 4u)) continue;
-                const std::uint32_t pixel = runtime.memory().load32(address) & 0x00FFFFFFu;
-                if (pixel != 0u) ++probe_non_black;
-                ++probe_colors[pixel];
-            }
-        }
-        std::cerr << "[lcs-fb-probe] " << psprecomp::hex32(probe)
-                  << " non_black=" << probe_non_black
-                  << " distinct=" << probe_colors.size();
-        std::vector<std::pair<std::uint32_t, std::uint64_t>> top(probe_colors.begin(), probe_colors.end());
-        std::sort(top.begin(), top.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
-        for (std::size_t i = 0; i < top.size() && i < 3u; ++i) {
-            std::cerr << " | " << psprecomp::hex32(top[i].first) << "x" << top[i].second;
-        }
-        std::cerr << "\n";
-    }
-
-    const std::uint32_t base = display_state.frame_buffer;
-    if (base == 0u) {
-        std::cerr << "[lcs-fb] no framebuffer set\n";
-        return;
-    }
-    const std::uint32_t width = 480u;
-    const std::uint32_t height = 272u;
-    const std::uint32_t stride = display_state.buffer_width != 0u ? display_state.buffer_width : width;
-    std::uint64_t non_black = 0u;
-    std::map<std::uint32_t, std::uint64_t> histogram;
-    for (std::uint32_t y = 0; y < height; ++y) {
-        for (std::uint32_t x = 0; x < width; ++x) {
-            const std::uint32_t address = base + (y * stride + x) * 4u;
-            if (!runtime.memory().contains(address, 4u)) continue;
-            const std::uint32_t pixel = runtime.memory().load32(address) & 0x00FFFFFFu;
-            if (pixel != 0u) ++non_black;
-            ++histogram[pixel];
-        }
-    }
-    std::cerr << "[lcs-fb] base=" << psprecomp::hex32(base) << " stride=" << stride
-              << " non_black=" << non_black << " distinct_colors=" << histogram.size() << "\n";
-    std::vector<std::pair<std::uint32_t, std::uint64_t>> sorted(histogram.begin(), histogram.end());
-    std::sort(sorted.begin(), sorted.end(),
-              [](const auto &a, const auto &b) { return a.second > b.second; });
-    for (std::size_t i = 0; i < sorted.size() && i < 6u; ++i) {
-        std::cerr << "[lcs-fb] color=" << psprecomp::hex32(sorted[i].first)
-                  << " pixels=" << sorted[i].second << "\n";
-    }
-}
-
-void dump_pc_profile() {
-    if (pc_profile.empty()) return;
-    std::vector<std::pair<std::uint32_t, std::uint64_t>> sorted(pc_profile.begin(), pc_profile.end());
-    std::sort(sorted.begin(), sorted.end(),
-              [](const auto &a, const auto &b) { return a.second > b.second; });
-    std::cerr << "[lcs-profile] distinct_targets=" << sorted.size() << "\n";
-    std::vector<std::uint32_t> watch_list{0x08AC72D8u, 0x08AC7860u, 0x08B0B440u, 0x08AA3190u};
-    if (const char *text = std::getenv("LCS_PC_WATCH")) {
-        watch_list.clear();
-        std::stringstream stream(text);
-        std::string item;
-        while (std::getline(stream, item, ',')) {
-            if (item.empty()) continue;
-            watch_list.push_back(static_cast<std::uint32_t>(std::strtoul(item.c_str(), nullptr, 0)));
-        }
-    }
-    for (const std::uint32_t watched : watch_list) {
-        const auto found = pc_profile.find(watched);
-        std::cerr << "[lcs-profile] watched " << psprecomp::hex32(watched) << " calls="
-                  << (found != pc_profile.end() ? found->second : 0u) << "\n";
-    }
-    for (std::size_t i = 0; i < sorted.size() && i < 80u; ++i) {
-        std::cerr << "[lcs-profile] " << psprecomp::hex32(sorted[i].first)
-                  << " calls=" << sorted[i].second << "\n";
-    }
-    std::vector<std::pair<std::uint64_t, std::uint64_t>> callers(pc_profile_callers.begin(),
-                                                                 pc_profile_callers.end());
-    std::sort(callers.begin(), callers.end(),
-              [](const auto &a, const auto &b) { return a.second > b.second; });
-    for (std::size_t i = 0; i < callers.size() && i < 200u; ++i) {
-        std::cerr << "[lcs-profile-caller] target=" << psprecomp::hex32(static_cast<std::uint32_t>(callers[i].first >> 32u))
-                  << " ra=" << psprecomp::hex32(static_cast<std::uint32_t>(callers[i].first))
-                  << " calls=" << callers[i].second << "\n";
-    }
 }
 
 void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start) {
@@ -2453,9 +1916,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
     g_vblank_interrupt_due_us = 0u;
     lcs_install_lang(runtime);
 
-    if (std::getenv("LCS_PC_PROFILE") != nullptr) {
-        psprecomp::set_runtime_pre_chained_call_hook(&lcs_pc_profile_hook);
-    }
     {
         const char *interval_text = std::getenv("PSPRECOMP_TIME_TICK_DISPATCHES");
         std::uint64_t interval = 256u;
@@ -2605,15 +2065,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 next.set_gpr(5, 0u);
             }
 
-            if (std::getenv("LCS_THREAD_DIAG") != nullptr) {
-                std::cerr << "[thread] start \"" << thread.name << "\" arg_size=" << arg_size
-                          << " arg_ptr=" << psprecomp::hex32(arg_ptr)
-                          << " sp=" << psprecomp::hex32(sp) << "\n";
-            }
-            if (thread.name == "MPEGreadThread" && arg_ptr != 0u && arg_size != 0u) {
-                mpeg_read_thread_args = sp;
-            }
-
             sp -= 64u;
             next.set_gpr(26, thread.kernel_context);
             next.set_gpr(28, ctx.gpr[28]);
@@ -2641,8 +2092,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
         [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             const std::int32_t uid = thread_table.current_uid;
             complete_current_thread(rt, ctx);
-            static const bool keep = std::getenv("LCS_EXIT_DELETE_KEEP") != nullptr;
-            if (keep || uid == 0 || uid == thread_table.current_uid) return;
+            if (uid == 0 || uid == thread_table.current_uid) return;
             const auto found = thread_table.threads.find(uid);
             if (found == thread_table.threads.end()) return;
             remove_thread_from_wait_queues(uid);
@@ -2977,15 +2427,11 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
         });
 
     auto delay_thread = [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-        if (thread_table.current_uid == 3)
-            hang_trace("delay us=" + std::to_string(ctx.gpr[4]) + " ra=" + psprecomp::hex32(ctx.gpr[31]));
         if (deliver_pending_ge_callback(ctx, ctx.gpr[4])) return;
         if (dispatch_vblank_interrupt_if_due(rt, ctx, ctx.gpr[4])) return;
         (void)delay_current_thread(rt, ctx, ctx.gpr[4]);
     };
     auto delay_thread_cb = [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-        if (thread_table.current_uid == 3)
-            hang_trace("delaycb us=" + std::to_string(ctx.gpr[4]) + " ra=" + psprecomp::hex32(ctx.gpr[31]));
         if (try_dispatch_pending_callback(ctx)) return;
         if (deliver_pending_ge_callback(ctx, ctx.gpr[4])) return;
         if (dispatch_vblank_interrupt_if_due(rt, ctx, ctx.gpr[4])) return;
@@ -2999,11 +2445,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
 
             const std::string name = ctx.gpr[4] != 0u ? rt.memory().read_c_string(ctx.gpr[4], 128u) : "callback";
             const std::int32_t uid = callback_table.next_uid++;
-            if (std::getenv("LCS_CB_DIAG") != nullptr) {
-                std::cerr << "[cb] CreateCallback uid=" << uid << " name=\"" << name
-                          << "\" func=" << psprecomp::hex32(ctx.gpr[5])
-                          << " common=" << psprecomp::hex32(ctx.gpr[6]) << "\n";
-            }
             callback_table.callbacks.emplace(uid, CallbackRecord{
                 name, ctx.gpr[5], ctx.gpr[6], thread_table.current_uid, 0u, 0u});
             notify_umd_callback();
@@ -3071,13 +2512,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 return;
             }
             SemaphoreRecord &semaphore = it->second;
-            if (const char *watched = std::getenv("LCS_SEMA_DIAG");
-                watched != nullptr && (semaphore.name == watched || std::string(watched) == "ALL")) {
-                std::cerr << "[sema] SIGNAL \"" << semaphore.name << "\" +" << amount
-                          << " count=" << semaphore.count << " waiters=" << semaphore.waiters.size()
-                          << " uid=" << thread_table.current_uid
-                          << " ra=" << psprecomp::hex32(ctx.gpr[31]) << "\n";
-            }
             semaphore.count += amount;
             auto waiter = semaphore.waiters.begin();
             while (waiter != semaphore.waiters.end()) {
@@ -3101,14 +2535,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
         if (it == semaphore_table.semaphores.end() || amount <= 0 || amount > it->second.maximum) {
             ctx.set_gpr(2, 0x80020199u);
             return;
-        }
-        if (const char *watched = std::getenv("LCS_SEMA_DIAG");
-            watched != nullptr && it->second.name == watched) {
-            std::cerr << "[sema] WAIT \"" << it->second.name << "\" -" << amount
-                      << " count=" << it->second.count
-                      << " blocks=" << (it->second.count >= amount ? 0 : 1)
-                      << " uid=" << thread_table.current_uid
-                      << " ra=" << psprecomp::hex32(ctx.gpr[31]) << "\n";
         }
         if (it->second.count >= amount) {
             it->second.count -= amount;
@@ -3175,52 +2601,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 return;
             }
             EventFlagRecord &flag = it->second;
-            if (const char *watched = std::getenv("LCS_FLAG_DIAG");
-                watched != nullptr && flag.name == watched) {
-                std::cerr << "[flag] SET \"" << flag.name << "\" bits="
-                          << psprecomp::hex32(ctx.gpr[5])
-                          << " pattern " << psprecomp::hex32(flag.current_pattern) << " -> "
-                          << psprecomp::hex32(flag.current_pattern | ctx.gpr[5])
-                          << " uid=" << thread_table.current_uid
-                          << " ra=" << psprecomp::hex32(ctx.gpr[31]) << "\n";
-            }
-            if (std::getenv("LCS_WORLD_DIAG") != nullptr && flag.name == "WorldStreamEventFlag") {
-                std::cerr << "[world] SET bits=" << psprecomp::hex32(ctx.gpr[5])
-                          << " pattern " << psprecomp::hex32(flag.current_pattern) << " -> "
-                          << psprecomp::hex32(flag.current_pattern | ctx.gpr[5])
-                          << " uid=" << thread_table.current_uid
-                          << " ra=" << psprecomp::hex32(ctx.gpr[31]);
-                if (rt.memory().contains(0x08B5D16Cu, 4u)) {
-                    const std::uint32_t manager = rt.memory().load32(0x08B5D16Cu);
-                    if (manager != 0u && rt.memory().contains(manager + 0xD04u, 4u)) {
-                        const std::uint32_t head = rt.memory().load32(manager + 0xCFCu);
-                        const std::uint32_t free_head = rt.memory().load32(manager + 0xCF4u);
-                        std::cerr << " queue_empty=" << (head == manager + 0xCFCu ? 1 : 0)
-                                  << " free_empty=" << (free_head == manager + 0xCF4u ? 1 : 0)
-                                  << " busy=" << psprecomp::hex32(rt.memory().load32(manager + 0xD04u))
-                                  << " msg=\"" << rt.memory().read_c_string(0x08B2C1C8u) << "\"";
-                    }
-                }
-                std::cerr << "\n";
-            }
-            if (flag.name == "UmdStreamEventFlag" && (ctx.gpr[5] & 0x2u) != 0u &&
-                std::getenv("LCS_GATE_NUDGE") != nullptr &&
-                rt.memory().contains(0x08B56950u, 4u)) {
-                const std::uint32_t current = rt.memory().load32(0x08B56950u);
-                if (current < 2u) rt.memory().store32(0x08B56950u, current + 1u);
-                if (rt.memory().contains(0x08B5691Cu, 1u)) rt.memory().store8(0x08B5691Cu, 0u);
-                if (rt.memory().contains(0x08B5691Du, 1u)) rt.memory().store8(0x08B5691Du, 0u);
-                if (std::getenv("LCS_GATE_NUDGE_BUSY") != nullptr &&
-                    rt.memory().contains(0x08B5691Eu, 1u))
-                    rt.memory().store8(0x08B5691Eu, 0u);
-                if (std::getenv("LCS_STREAM_DIAG") != nullptr) {
-                    static std::uint32_t stream_events = 0u;
-                    std::cerr << "[stream] event #" << ++stream_events
-                              << " uid=" << thread_table.current_uid
-                              << " ra=" << psprecomp::hex32(ctx.gpr[31])
-                              << " t=" << virtual_time_us << "\n";
-                }
-            }
             flag.current_pattern |= ctx.gpr[5];
             auto waiter = flag.waiters.begin();
             while (waiter != flag.waiters.end()) {
@@ -3246,14 +2626,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 ctx.set_gpr(2, 0x8002019Au);
                 return;
             }
-            if (std::getenv("LCS_WORLD_DIAG") != nullptr &&
-                it->second.name == "WorldStreamEventFlag") {
-                std::cerr << "[world] CLEAR mask=" << psprecomp::hex32(ctx.gpr[5])
-                          << " pattern " << psprecomp::hex32(it->second.current_pattern) << " -> "
-                          << psprecomp::hex32(it->second.current_pattern & ctx.gpr[5])
-                          << " uid=" << thread_table.current_uid
-                          << " ra=" << psprecomp::hex32(ctx.gpr[31]) << "\n";
-            }
             it->second.current_pattern &= ctx.gpr[5];
             set_success(ctx);
         });
@@ -3271,29 +2643,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             ctx.set_gpr(2, 0x800201B1u);
             return;
         }
-        const bool matched = event_flag_matches(it->second, requested, mode);
-        if (const char *watched = std::getenv("LCS_FLAG_DIAG");
-            watched != nullptr && it->second.name == watched) {
-            std::cerr << "[flag] WAIT \"" << it->second.name << "\" pattern="
-                      << psprecomp::hex32(it->second.current_pattern)
-                      << " req=" << psprecomp::hex32(requested)
-                      << " mode=" << psprecomp::hex32(mode)
-                      << " matched=" << (matched ? 1 : 0)
-                      << " uid=" << thread_table.current_uid
-                      << " ra=" << psprecomp::hex32(ctx.gpr[31]) << "\n";
-        }
-        if (std::getenv("LCS_WAIT_DIAG") != nullptr && it->second.name == "UmdStreamEventFlag") {
-            static std::uint64_t matched_count = 0u, blocked_count = 0u;
-            (matched ? matched_count : blocked_count)++;
-            if (((matched_count + blocked_count) % 2000u) == 0u) {
-                std::cerr << "[wait] UmdStreamEventFlag matched=" << matched_count
-                          << " blocked=" << blocked_count
-                          << " pattern=" << psprecomp::hex32(it->second.current_pattern)
-                          << " req=" << psprecomp::hex32(requested)
-                          << " mode=" << psprecomp::hex32(mode) << "\n";
-            }
-        }
-        if (matched) {
+        if (event_flag_matches(it->second, requested, mode)) {
             if (ctx.gpr[7] != 0u && rt.memory().contains(ctx.gpr[7], 4u))
                 rt.memory().store32(ctx.gpr[7], it->second.current_pattern);
             consume_event_flag(it->second, requested, mode);
@@ -3317,16 +2667,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             }
             const std::uint32_t requested = ctx.gpr[5];
             const std::uint32_t mode = ctx.gpr[6];
-            if (std::getenv("LCS_POLL_DIAG") != nullptr) {
-                static std::uint64_t polls = 0u;
-                if ((++polls % 5000u) == 0u) {
-                    std::cerr << "[poll] #" << polls << " uid=" << thread_table.current_uid
-                              << " flag=\"" << it->second.name
-                              << "\" pattern=" << psprecomp::hex32(it->second.current_pattern)
-                              << " req=" << psprecomp::hex32(requested)
-                              << " mode=" << psprecomp::hex32(mode) << "\n";
-                }
-            }
             if (!event_flag_matches(it->second, requested, mode)) {
                 if (ctx.gpr[7] != 0u && rt.memory().contains(ctx.gpr[7], 4u))
                     rt.memory().store32(ctx.gpr[7], it->second.current_pattern);
@@ -3487,10 +2827,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 set_success(ctx);
                 return;
             }
-            if (std::getenv("PSPRECOMP_IO_DIAG") != nullptr) {
-                std::cerr << "[io] unsupported sceIoDevctl device=" << device
-                          << " cmd=0x" << std::hex << command << std::dec << "\n";
-            }
             ctx.set_gpr(2, 0x80010016u);
         });
 
@@ -3516,11 +2852,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                             std::fstream stream(disc_file->native_path, std::ios::binary | std::ios::in);
                             if (stream) {
                                 const auto fd = file_table.next_fd++;
-                                if (std::getenv("PSPRECOMP_IO_DIAG") != nullptr) {
-                                    std::cerr << "[io] raw UMD open lbn=" << raw_lbn
-                                              << " size=" << declared_size << " native=\""
-                                              << disc_file->native_path.filename().string() << "\"\n";
-                                }
                                 file_table.files.emplace(fd, std::move(stream));
                                 file_table.raw_sector_files.emplace(
                                     fd, RawSectorFile{0ull, disc_file->size});
@@ -3529,16 +2860,9 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                             }
                         }
                         const std::uint64_t base_offset = raw_lbn * 2048ull;
-                        const std::uint64_t virtual_disc_size =
-                            static_cast<std::uint64_t>(file_table.next_virtual_sector) * 2048ull;
                         const auto fd = file_table.next_fd++;
                         file_table.virtual_disc_handles.emplace(
                             fd, VirtualDiscHandle{base_offset, declared_size, 0u});
-                        if (std::getenv("PSPRECOMP_IO_DIAG") != nullptr) {
-                            std::cerr << "[io] virtual UMD range fd=" << fd << " lbn=" << raw_lbn
-                                      << " size=" << declared_size
-                                      << " disc_size=" << virtual_disc_size << "\n";
-                        }
                         ctx.set_gpr(2, static_cast<std::uint32_t>(fd));
                         return;
                     }
@@ -3552,17 +2876,10 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             if ((flags & 0x0002u) != 0u) mode |= std::ios::out;
             std::fstream stream(native, mode);
             if (!stream) {
-                if (std::getenv("PSPRECOMP_IO_DIAG") != nullptr) {
-                    std::cerr << "[io] sceIoOpen failed psp=\"" << path
-                              << "\" native=\"" << native.string() << "\"\n";
-                }
                 ctx.set_gpr(2, 0x80010002u);
                 return;
             }
             const auto fd = file_table.next_fd++;
-            if (std::getenv("PSPRECOMP_IO_DIAG") != nullptr) {
-                std::cerr << "[io] sceIoOpen fd=" << fd << " psp=\"" << path << "\"\n";
-            }
             file_table.files.emplace(fd, std::move(stream));
             ctx.set_gpr(2, static_cast<std::uint32_t>(fd));
         });
@@ -3629,10 +2946,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             it->second.clear();
             it->second.read(reinterpret_cast<char *>(guest_destination), static_cast<std::streamsize>(size));
             const auto read = static_cast<std::uint32_t>(it->second.gcount());
-            if (std::getenv("PSPRECOMP_IO_DIAG") != nullptr) {
-                std::cerr << "[io] sceIoRead fd=" << fd << " size=" << size
-                          << " read=" << read << "\n";
-            }
             ctx.set_gpr(2, read);
         });
 
@@ -3708,11 +3021,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             if (raw != file_table.raw_sector_files.end()) {
                 position = position >= raw->second.base ? position - raw->second.base : 0ull;
             }
-            if (fd != 64 && std::getenv("PSPRECOMP_IO_DIAG") != nullptr) {
-                std::cerr << "[io] sceIoLseek fd=" << fd << " off=" << offset
-                          << " whence=" << whence << " -> " << position
-                          << (raw != file_table.raw_sector_files.end() ? " (raw)" : "") << "\n";
-            }
             ctx.set_gpr(2, static_cast<std::uint32_t>(position));
             ctx.set_gpr(3, static_cast<std::uint32_t>(position >> 32u));
         });
@@ -3732,9 +3040,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             if (!directory && !regular) {
                 ctx.set_gpr(2, 0x80010002u);
                 return;
-            }
-            if (std::getenv("PSPRECOMP_IO_DIAG") != nullptr) {
-                std::cerr << "[io] sceIoGetstat \"" << path << "\"\n";
             }
             rt.memory().zero(stat_address, 0x58u);
             rt.memory().store32(stat_address + 0x00u, (directory ? 0x1000u : 0x2000u) | 0x01FFu);
@@ -3808,11 +3113,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                     rt.memory().store32(dirent + 8u, static_cast<std::uint32_t>(disc_file->size));
                     rt.memory().store32(dirent + 12u, static_cast<std::uint32_t>(disc_file->size >> 32u));
                     rt.memory().store32(dirent + 0x40u, disc_file->start_sector);
-                    if (std::getenv("PSPRECOMP_IO_DIAG") != nullptr) {
-                        std::cerr << "[io] sceIoDread file=\"" << disc_directory_name(entry.path())
-                                  << "\" sector=" << disc_file->start_sector
-                                  << " size=" << disc_file->size << "\n";
-                    }
                 }
             }
             const std::string name = disc_directory_name(entry.path());
@@ -3904,10 +3204,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 ctx.set_gpr(2, 0x80000107u);
                 return;
             }
-            if (std::getenv("LCS_TICK_DIAG") != nullptr && display_state.frame_buffer != address) {
-                std::cerr << "[tick] SetFrameBuf " << psprecomp::hex32(address)
-                          << " stride=" << stride << " fmt=" << format << "\n";
-            }
             display_state.frame_buffer = address;
             display_state.buffer_width = stride;
             display_state.pixel_format = format;
@@ -3922,31 +3218,11 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
         });
     runtime.register_hle("sceDisplay", 0x9C6EAAD7u,
         [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-            if (std::getenv("LCS_TICK_DIAG") != nullptr) {
-                std::cerr << "[tick] GetVcount uid=" << thread_table.current_uid
-                          << " a0=" << ctx.gpr[4] << " s5=" << ctx.gpr[21]
-                          << " vblank=" << display_vblank_index << "\n";
-            }
             ctx.set_gpr(2, static_cast<std::uint32_t>(display_vblank_index));
         });
     auto wait_vblank = [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
         ++display_vblank_index;
         check_wall_clock_limit(rt, 0x3Fu);
-        reset_pc_profile_on_key();
-        dump_ram_if_requested(rt.memory());
-        if (std::getenv("LCS_TICK_DIAG") != nullptr) {
-            std::cerr << "[tick] WaitVblank uid=" << thread_table.current_uid
-                      << " ra=" << psprecomp::hex32(ctx.gpr[31]) << " vblank=" << display_vblank_index
-                      << " fb=" << psprecomp::hex32(display_state.frame_buffer);
-            if (thread_table.current_uid == 3 && rt.memory().contains(0x08B56920u, 4u) &&
-                rt.memory().contains(0x08B56950u, 4u)) {
-                std::cerr << " gate0x6920=" << psprecomp::hex32(rt.memory().load32(0x08B56920u))
-                          << " gate0x6950=" << psprecomp::hex32(rt.memory().load32(0x08B56950u))
-                          << " skip691c=" << static_cast<int>(rt.memory().load8(0x08B5691Cu))
-                          << " skip691d=" << static_cast<int>(rt.memory().load8(0x08B5691Du));
-            }
-            std::cerr << "\n";
-        }
         PresentRequest request{};
         request.vblank = display_vblank_index;
         request.display_buffer = display_state.frame_buffer;
@@ -3975,19 +3251,12 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             return;
         }
         audio_output_advance(virtual_time_us);
-        const auto throttle_started = std::chrono::steady_clock::now();
         if (const std::uint32_t skipped = throttle_vblank_to_real_time(); skipped != 0u) {
             virtual_time_us += static_cast<std::uint64_t>(skipped) * kVblankPeriodUs;
             display_vblank_index += skipped;
         }
-        g_speed_throttle_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - throttle_started).count());
-        report_realtime_speed_if_requested(rt, display_vblank_index);
-        static const bool fixed_delay = std::getenv("LCS_VBLANK_FIXED_DELAY") != nullptr;
-        const std::uint32_t vblank_delay = fixed_delay
-            ? static_cast<std::uint32_t>(kVblankPeriodUs)
-            : static_cast<std::uint32_t>((virtual_time_us / kVblankPeriodUs + 1u) * kVblankPeriodUs -
-                                         virtual_time_us);
+        const std::uint32_t vblank_delay = static_cast<std::uint32_t>(
+            (virtual_time_us / kVblankPeriodUs + 1u) * kVblankPeriodUs - virtual_time_us);
         if (deliver_pending_ge_callback(ctx, vblank_delay, true)) return;
         if (dispatch_vblank_interrupt(rt, ctx, vblank_delay)) return;
         (void)delay_current_thread(rt, ctx, vblank_delay);
@@ -4001,13 +3270,8 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
         [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2, 0x04000000u); });
     runtime.register_hle("sceGe_user", 0xAB49E76Au,
         [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-            if (std::getenv("LCS_GE_COUNT_DIAG") != nullptr)
-                std::cerr << "[ge] list #" << (ge_next_list_id) << " enqueued\n";
-            if (std::getenv("LCS_TICK_DIAG") != nullptr)
-                std::cerr << "[tick] sceGeListEnQueue list=0x" << psprecomp::hex32(ctx.gpr[4]) << "\n";
             const std::uint32_t list_address = ctx.gpr[4];
-            static const bool draw_vblank_lists = std::getenv("LCS_DRAW_VBLANK_LISTS") != nullptr;
-            const bool from_vblank = !draw_vblank_lists && in_vblank_interrupt();
+            const bool from_vblank = in_vblank_interrupt();
             if (!from_vblank) cap_frame_rate(list_address);
             bool list_finished = false;
             std::uint32_t finish_argument = 0u;
@@ -4022,39 +3286,17 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 finish_argument = scan.finish_argument;
                 const std::uint64_t vblank = display_vblank_index;
                 ge_worker_submit([&rt, list_address, vblank] {
-                    const auto list_started = std::chrono::steady_clock::now();
                     execute_ge_list_frame(rt, list_address, vblank);
-                    g_speed_ge_list_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - list_started).count());
                 });
             } else {
                 lcs_menu_enqueue();
-                const auto list_started = std::chrono::steady_clock::now();
                 execute_ge_list_frame(rt, list_address, display_vblank_index);
-                g_speed_ge_list_ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - list_started).count());
                 list_finished = rendered_list_finished();
                 finish_argument = rendered_finish_argument();
             }
             const auto list_id = static_cast<std::uint32_t>(ge_next_list_id++);
             const auto cbid = static_cast<std::int32_t>(ctx.gpr[6]);
             const auto found = ge_callback_table.callbacks.find(cbid);
-            hang_trace("enqueue list=" + psprecomp::hex32(list_address) +
-                       " from_vblank=" + std::to_string(from_vblank ? 1 : 0) +
-                       " finished=" + std::to_string(list_finished ? 1 : 0) +
-                       " finish_arg=" + std::to_string(finish_argument) +
-                       " cbid=" + std::to_string(cbid) +
-                       " ra=" + psprecomp::hex32(ctx.gpr[31]));
-            if (std::getenv("LCS_TICK_DIAG") != nullptr)
-                std::cerr << "[tick] sceGeListEnQueue cbid=" << cbid
-                          << " found=" << (found != ge_callback_table.callbacks.end())
-                          << " finish_fn=0x"
-                          << psprecomp::hex32(found != ge_callback_table.callbacks.end()
-                                                   ? found->second.finish_function : 0u)
-                          << "\n";
-            if (std::getenv("LCS_TICK_DIAG") != nullptr)
-                std::cerr << "[tick] sceGeListEnQueue finished=" << list_finished
-                          << " finish_arg=" << finish_argument << "\n";
             if (found != ge_callback_table.callbacks.end() && found->second.finish_function != 0u &&
                 list_finished) {
                 pending_ge_callbacks[thread_table.current_uid].push_back(PendingGeCallback{
@@ -4083,9 +3325,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             };
             const std::int32_t uid = ge_callback_table.next_uid++;
             ge_callback_table.callbacks.emplace(uid, record);
-            if (std::getenv("LCS_TICK_DIAG") != nullptr)
-                std::cerr << "[tick] sceGeSetCallback uid=" << uid << " finish_fn=0x"
-                          << psprecomp::hex32(record.finish_function) << "\n";
             ctx.set_gpr(2, static_cast<std::uint32_t>(uid));
         });
     runtime.register_hle("sceGe_user", 0x05DB22CEu,
@@ -4271,9 +3510,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 return;
             }
             sub_interrupts.emplace(key, SubInterruptRecord{handler, argument, false});
-            std::cerr << "[lcs] RegisterSubIntrHandler intr=" << interrupt_number
-                      << " sub=" << sub_number << " handler=0x" << std::hex << handler
-                      << " arg=0x" << argument << std::dec << "\n";
             set_success(ctx);
         });
     runtime.register_hle("InterruptManager", 0xD61E6961u,
@@ -4335,10 +3571,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
         });
     runtime.register_hle("sceMpeg", 0xD8C5F121u,
         [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-            if (std::getenv("LCS_SKIP_MPEG") != nullptr) {
-                ctx.set_gpr(2, 0x80610003u);
-                return;
-            }
             const std::uint32_t mpeg_out = ctx.gpr[4];
             const std::uint32_t data = ctx.gpr[5];
             const std::uint32_t size = ctx.gpr[6];
@@ -4412,12 +3644,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                             find_pmf_on_disc(rt.translate_path("disc0:/"), header);
                     }
                 }
-                if (std::getenv("LCS_MPEG_DIAG") != nullptr) {
-                    std::cerr << "[mpeg] header " << header.width << "x" << header.height
-                              << " offset=" << header.stream_offset
-                              << " size=" << header.stream_size << " source=\""
-                              << state->second.source_path.string() << "\"\n";
-                }
             }
             rt.memory().store32(output, header.stream_offset);
             set_success(ctx);
@@ -4471,18 +3697,10 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
     constexpr std::uint32_t kAtracErrorBadAddress = 0x800200D3u;
 
     const auto get_atrac = [](std::uint32_t id) -> AtracContextState * {
-        if (id >= atrac_contexts.size() || !atrac_contexts[id].allocated) {
-            if (atrac_diag_enabled())
-                std::cerr << "[atrac] bad id " << static_cast<std::int32_t>(id)
-                          << " uid=" << thread_table.current_uid << " t=" << virtual_time_us << "\n";
-            return nullptr;
-        }
+        if (id >= atrac_contexts.size() || !atrac_contexts[id].allocated) return nullptr;
         return &atrac_contexts[id];
     };
-    const auto atrac_fail = [](psprecomp::AllegrexContext &ctx, std::uint32_t code, const char *where) {
-        if (atrac_diag_enabled())
-            std::cerr << "[atrac] " << where << " failed " << psprecomp::hex32(code)
-                      << " uid=" << thread_table.current_uid << " t=" << virtual_time_us << "\n";
+    const auto atrac_fail = [](psprecomp::AllegrexContext &ctx, std::uint32_t code, const char *) {
         ctx.set_gpr(2, code);
     };
 
@@ -4519,15 +3737,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             state.next_file_offset = std::min(read_size, parsed.file_size);
             state.write_offset = buffer_size == 0u ? 0u : read_size % buffer_size;
             state.source_path = identify_atrac_source(rt.translate_path("disc0:/"), header_bytes, parsed);
-            if (atrac_diag_enabled() || state.source_path.empty()) {
-                std::cerr << "[atrac] set-halfway id=" << id
-                          << " buffer=" << psprecomp::hex32(buffer)
-                          << " read=" << read_size << " capacity=" << buffer_size
-                          << " file=" << parsed.file_size << " frame=" << parsed.block_align
-                          << " rate=" << parsed.sample_rate << " channels=" << parsed.channels
-                          << " samples=" << parsed.total_samples
-                          << " source=\"" << state.source_path.string() << "\"\n";
-            }
             ctx.set_gpr(2, static_cast<std::uint32_t>(id));
         });
 
@@ -4604,8 +3813,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             }
             if (state->source_path.empty()) {
                 state->internal_error = kAtracErrorUnknownFormat;
-                if (atrac_diag_enabled())
-                    std::cerr << "[atrac] decode id=" << ctx.gpr[4] << " failed: unidentified source\n";
                 ctx.set_gpr(2, kAtracErrorApiFail); return;
             }
             auto restart_for_loop = [&]() -> bool {
@@ -4649,11 +3856,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             if (samples_addr != 0u) rt.memory().store32(samples_addr, samples);
             if (finish_addr != 0u) rt.memory().store32(finish_addr, finished ? 1u : 0u);
             if (remain_addr != 0u) rt.memory().store32(remain_addr, remaining_frames);
-            if (atrac_diag_enabled()) {
-                std::cerr << "[atrac] decode id=" << ctx.gpr[4] << " samples=" << samples
-                          << " position=" << state->sample_position << " finish=" << finished
-                          << " buffered_frames=" << remaining_frames << "\n";
-            }
             set_success(ctx);
         });
 
@@ -5078,32 +4280,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                     std::span<const std::uint8_t>(frame.data() + y * source_stride, source_stride));
             }
             rt.memory().store32(status_pointer, 1u);
-            if (std::getenv("LCS_MPEG_DIAG") != nullptr) {
-                static std::uint32_t decoded_frames = 0u;
-                if ((++decoded_frames % 30u) == 1u) {
-                    std::uint64_t non_black = 0u;
-                    for (std::size_t i = 0; i + 3 < frame.size(); i += 4) {
-                        if ((frame[i] | frame[i + 1] | frame[i + 2]) != 0u) ++non_black;
-                    }
-                    std::uint64_t display_non_black = 0u;
-                    const std::uint32_t display_base = display_state.frame_buffer;
-                    if (display_base != 0u) {
-                        for (std::uint32_t y = 0; y < 272u; ++y) {
-                            for (std::uint32_t x = 0; x < 480u; ++x) {
-                                const std::uint32_t address = display_base + (y * 512u + x) * 4u;
-                                if (!rt.memory().contains(address, 4u)) continue;
-                                if ((rt.memory().load32(address) & 0x00FFFFFFu) != 0u)
-                                    ++display_non_black;
-                            }
-                        }
-                    }
-                    std::cerr << "[mpeg] frame #" << decoded_frames << " -> "
-                              << psprecomp::hex32(destination) << " non_black=" << non_black
-                              << "/" << (frame.size() / 4u) << " (display fb "
-                              << psprecomp::hex32(display_base) << " non_black="
-                              << display_non_black << ")\n";
-                }
-            }
             set_success(ctx);
         });
 
@@ -5151,10 +4327,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             ctx.set_gpr(6, callback_argument);
             ctx.set_gpr(31, 0x00000004u);
             ctx.pc = callback;
-            if (std::getenv("LCS_MPEG_DIAG") != nullptr) {
-                std::cerr << "[mpeg] ring put callback=" << psprecomp::hex32(callback)
-                          << " desired=" << desired << "\n";
-            }
         });
 
     runtime.register_hle("sceMpeg", 0xB5F6DC87u,
@@ -5322,37 +4494,6 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             const std::uint64_t second = load(ctx.gpr[5]);
             ctx.set_gpr(2, first < second ? 0xFFFFFFFFu : (first > second ? 1u : 0u));
         });
-}
-
-void debug_dump_threads() {
-    std::cerr << "[lcs-debug] thread_table.current_uid=" << thread_table.current_uid
-              << " threads=" << thread_table.threads.size()
-              << " continuations=" << thread_table.continuations.size()
-              << " virtual_time_us=" << virtual_time_us << "\n";
-    for (const auto &[uid, thread] : thread_table.threads) {
-        std::cerr << "[lcs-debug]   thread uid=" << uid << " name=\"" << thread.name
-                  << "\" state=" << static_cast<int>(thread.state)
-                  << " priority=" << thread.priority
-                  << " delay_until_us=" << thread.delay_until_us
-                  << " entry=" << psprecomp::hex32(thread.entry)
-                  << " suspended_pc=" << psprecomp::hex32(thread.suspended_context.pc) << "\n";
-    }
-    for (const auto &continuation : thread_table.continuations) {
-        std::cerr << "[lcs-debug]   ready uid=" << continuation.uid << "\n";
-    }
-    std::cerr << "[lcs-debug] semaphores=" << semaphore_table.semaphores.size()
-              << " event_flags=" << event_flag_table.flags.size()
-              << " partitions=" << partition_table.blocks.size() << "\n";
-    for (const auto &[uid, sema] : semaphore_table.semaphores) {
-        std::cerr << "[lcs-debug]   sema uid=" << uid << " name=\"" << sema.name
-                  << "\" count=" << sema.count << " max=" << sema.maximum
-                  << " waiters=" << sema.waiters.size() << "\n";
-    }
-    for (const auto &[uid, flag] : event_flag_table.flags) {
-        std::cerr << "[lcs-debug]   eventflag uid=" << uid << " name=\"" << flag.name
-                  << "\" pattern=" << psprecomp::hex32(flag.current_pattern)
-                  << " waiters=" << flag.waiters.size() << "\n";
-    }
 }
 
 }

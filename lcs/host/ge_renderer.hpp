@@ -33,39 +33,6 @@ struct GeBoundingBoxResult {
 };
 
 struct GeRenderStats {
-    std::uint64_t primitives{};
-    std::uint64_t points{};
-    std::uint64_t lines{};
-    std::uint64_t triangles{};
-    std::uint64_t rectangles{};
-    std::uint64_t skinned_vertices{};
-    std::uint64_t morphed_vertices{};
-    std::uint64_t lit_vertices{};
-    std::uint64_t generated_uv_vertices{};
-    std::uint64_t culled_triangles{};
-    std::uint64_t flat_shaded_primitives{};
-    std::uint64_t pixels_tested{};
-    std::uint64_t pixels_written{};
-    std::uint64_t unsupported_primitives{};
-    std::uint64_t decoded_vertices{};
-    std::uint64_t nonfinite_clip_vertices{};
-    std::uint64_t screen_vertices{};
-    bool has_clip_bounds{};
-    bool has_screen_bounds{};
-    float clip_min_x{};
-    float clip_min_y{};
-    float clip_min_z{};
-    float clip_min_w{};
-    float clip_max_x{};
-    float clip_max_y{};
-    float clip_max_z{};
-    float clip_max_w{};
-    float screen_min_x{};
-    float screen_min_y{};
-    float screen_max_x{};
-    float screen_max_y{};
-    float min_abs_w{};
-    float max_abs_screen_coordinate{};
     std::uint32_t next_vertex_address{};
     std::uint32_t next_index_address{};
 };
@@ -90,34 +57,8 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                          std::uint32_t logical_primitive_count = 1u,
                          std::uint64_t draw_state_revision = 0u,
                          std::uint64_t camera_state_revision = 0u,
-                         std::uint64_t lighting_state_revision = 0u,
-                         bool collect_diagnostic_stats = true);
+                         std::uint64_t lighting_state_revision = 0u);
 
-struct GePhaseTotals {
-    std::uint64_t pixel_loop_ns{};
-    std::uint64_t triangles{};
-    std::uint64_t draw_setup_ns{};
-    std::uint64_t texture_upload_ns{};
-    std::uint64_t vertex_decode_ns{};
-    std::uint64_t gpu_stage_ns{};
-    std::uint64_t triangle_prep_ns{};
-    std::uint64_t gpu_accumulate_ns{};
-    std::uint64_t primitives{};
-    std::uint64_t vertices{};
-};
 void flush_ge_deferred_rasterization(psprecomp::GuestMemory &memory);
-
-[[nodiscard]] GePhaseTotals ge_phase_totals() noexcept;
-void reset_ge_phase_totals() noexcept;
-
-struct GeListSplitNs {
-    std::uint64_t vertex_ns{};
-    std::uint64_t tex_hash_ns{};
-    std::uint64_t tex_decode_ns{};
-    std::uint64_t vertex_copy_ns{};
-    std::uint64_t vertex_reused{};
-    std::uint64_t vertex_decoded{};
-};
-[[nodiscard]] GeListSplitNs take_ge_list_split() noexcept;
 
 }
