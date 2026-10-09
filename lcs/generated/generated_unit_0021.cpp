@@ -137,6 +137,36 @@ static const std::uint16_t kEntryIds_recomp_unit_0021[4096] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 642, 0, 0, 0, 0, 0, 0, 643, 0, 0, 0, 0, 644, 645, 0, 0, 0, 646, 0, 647, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 648, 0, 649, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 650, 0, 651,
 };
+// Shots go to the crosshair.
+static void crosshair_shot(Runtime &rt, AllegrexContext &ctx, GuestMemory::AotFastView &aot_mem) {
+    if (!lcs::lcs_free_aim_active() || ctx.gpr[17] != lcs::lcs_guest_player_ped(aot_mem)) return;
+
+    // Weapon range.
+    AllegrexContext info = ctx;
+    info.gpr[4] = aot_mem.aot_load32(ctx.gpr[16]);
+    info.gpr[31] = 0u;
+    if (!rt.invoke_isolated_aot(0x0894DA0Cu, info) || info.gpr[2] == 0u) return;
+
+    // Crosshair.
+    aot_mem.aot_store32(0x08B832A0u + 384u, std::bit_cast<std::uint32_t>(0.5f));
+    aot_mem.aot_store32(0x08B832A0u + 388u, std::bit_cast<std::uint32_t>(0.4f));
+
+    // Camera ray.
+    const std::uint32_t ray = ctx.gpr[29] - 48u;
+    AllegrexContext target = ctx;
+    target.gpr[29] = ctx.gpr[29] - 64u;
+    target.gpr[4] = 0x08B832A0u;
+    target.gpr[5] = ctx.gpr[29] + 96u;
+    target.gpr[6] = ray;
+    target.gpr[7] = ray + 16u;
+    target.gpr[31] = 0u;
+    target.fpr[12] = std::bit_cast<float>(aot_mem.aot_load32(info.gpr[2] + 4u));
+    if (!rt.invoke_isolated_aot(0x088ED398u, target)) return;
+
+    // New end point.
+    for (std::uint32_t i = 0; i < 12u; i += 4u)
+        aot_mem.aot_store32(ctx.gpr[29] + 80u + i, aot_mem.aot_load32(ray + 16u + i));
+}
 void recomp_unit_0021_entry(Runtime &rt, AllegrexContext &ctx, std::uint16_t direct_entry_id, GuestMemory::AotFastView &aot_mem) {
     std::uint32_t jump_target = 0u;
     std::uint32_t local_transfers = 0u;
@@ -1607,6 +1637,7 @@ L_08858600:
     aot_mem.aot_store8(ctx.gpr[5] + static_cast<std::uint32_t>(-7399), static_cast<std::uint8_t>(ctx.gpr[4]));
     goto L_0885860C;
 L_0885860C:
+    crosshair_shot(rt, ctx, aot_mem);
     ctx.gpr[4] = (2230u << 16u);
     aot_mem.aot_store8(ctx.gpr[4] + static_cast<std::uint32_t>(-7398), static_cast<std::uint8_t>(ctx.gpr[2]));
     ctx.gpr[8] = (aot_mem.aot_load32(ctx.gpr[16] + static_cast<std::uint32_t>(0)));
@@ -2304,6 +2335,7 @@ L_08858BC8:
     ctx.gpr[2] = (0u | 1u);
     goto L_08858BCC;
 L_08858BCC:
+    crosshair_shot(rt, ctx, aot_mem);
     ctx.gpr[21] = (2230u << 16u);
     aot_mem.aot_store8(ctx.gpr[21] + static_cast<std::uint32_t>(-7398), static_cast<std::uint8_t>(ctx.gpr[2]));
     ctx.gpr[8] = (aot_mem.aot_load32(ctx.gpr[16] + static_cast<std::uint32_t>(0)));
